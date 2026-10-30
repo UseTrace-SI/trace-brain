@@ -35,6 +35,14 @@ END;
 CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
   INSERT INTO memory_fts(memory_fts,rowid,content) VALUES('delete',old.rowid,old.content);
 END;
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+ INSERT INTO memory_fts(memory_fts,rowid,content) VALUES('delete',old.rowid,old.content);
+ INSERT INTO memory_fts(rowid,content) VALUES(new.rowid,new.content);
+END;
+CREATE TABLE IF NOT EXISTS memory_imports (
+ source_db TEXT NOT NULL, source TEXT NOT NULL, entity_kind TEXT NOT NULL, entity_id TEXT NOT NULL,
+ fingerprint TEXT NOT NULL, memory_id TEXT NOT NULL,
+ PRIMARY KEY(source_db,source,entity_kind,entity_id));
 CREATE INDEX IF NOT EXISTS memories_scope ON memories(scope, created_at DESC);
 `
 	if _, err := db.Exec(schema); err != nil {

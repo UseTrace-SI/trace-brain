@@ -1,0 +1,34 @@
+name: CI
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    name: Go checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Verify pure Go build
+        run: go build ./...
+        env:
+          CGO_ENABLED: '0'
+      - name: Vet
+        run: go vet ./...
+      - name: Race tests
+        run: go test -race -count=1 -timeout=5m ./...
+      - name: Repeat regression checks 100 times
+        run: go test -race -count=100 -run TestRegression -timeout=10m ./...
