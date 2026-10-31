@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/UseTrace-SI/trace-brain/internal/embed"
 )
 
 func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extract bool) error {
@@ -87,6 +89,8 @@ ON CONFLICT(id) DO UPDATE SET content=excluded.content`, id, kind, content, sour
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO memory_imports(source_db,source,entity_kind,entity_id,fingerprint,memory_id) VALUES(?,?,?,?,?,?)
 ON CONFLICT(source_db,source,entity_kind,entity_id) DO UPDATE SET fingerprint=excluded.fingerprint,memory_id=excluded.memory_id`, path, source, kind, entityID, fingerprint, id)
+		_, _ = tx.ExecContext(ctx, `INSERT OR REPLACE INTO embeddings(memory_id,dim,vector) VALUES(?,?,?)`,
+			id, embed.Dim, embed.Encode(embed.Embed(content)))
 		return err == nil, err
 	}
 	rows, err := src.QueryContext(ctx, "SELECT id, agent, worktree, started_at FROM sessions")

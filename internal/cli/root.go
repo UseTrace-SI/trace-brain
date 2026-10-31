@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/UseTrace-SI/trace-brain/internal/embed"
 	"github.com/UseTrace-SI/trace-brain/internal/mcp"
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/spf13/cobra"
@@ -18,6 +19,16 @@ var dbPath string
 func newRoot() *cobra.Command {
 	root := &cobra.Command{Use: "trace-brain", Short: "Continuous memory over Trace history"}
 	root.PersistentFlags().StringVar(&dbPath, "db", ".trace-brain/memory.db", "memory database path")
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		if !root.PersistentFlags().Changed("db") {
+			if _, err := os.Stat(".trace-brain/memory.db"); os.IsNotExist(err) {
+				if _, err := os.Stat(".trace/trace.db"); err == nil {
+					dbPath = ".trace/brain/memory.db"
+				}
+			}
+		}
+		return nil
+	}
 	root.AddCommand(versionCmd())
 	root.AddCommand(statusCmd())
 	root.AddCommand(rememberCmd())
@@ -33,6 +44,8 @@ func newRoot() *cobra.Command {
 	root.AddCommand(dashCmd())
 	root.AddCommand(setupCmd())
 	root.AddCommand(mcpCmd())
+	root.AddCommand(contextCmd())
+	root.AddCommand(refreshCmd())
 	return root
 }
 
@@ -82,8 +95,14 @@ func rememberCmd() *cobra.Command {
 		if scope == "" {
 			scope = "project"
 		}
+		now := time.Now().UnixMilli()
 		_, err = db.Exec("INSERT INTO memories(id,scope,content,source,created_at) VALUES(?,?,?,?,?)",
-			id, scope, content, "manual", time.Now().UnixMilli())
+			id, scope, content, "manual", now)
+		if err != nil {
+			return err
+		}
+		_, err = db.Exec("INSERT OR REPLACE INTO embeddings(memory_id,dim,vector) VALUES(?,?,?)",
+			id, embed.Dim, embed.Encode(embed.Embed(content)))
 		if err != nil {
 			return err
 		}

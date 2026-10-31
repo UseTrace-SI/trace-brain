@@ -13,7 +13,7 @@ func Open(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000"); err != nil {
+	if _, err := db.Exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON"); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS memory_imports (
  fingerprint TEXT NOT NULL, memory_id TEXT NOT NULL,
  PRIMARY KEY(source_db,source,entity_kind,entity_id));
 CREATE INDEX IF NOT EXISTS memories_scope ON memories(scope, created_at DESC);
+CREATE INDEX IF NOT EXISTS memory_imports_memory ON memory_imports(memory_id,source_db);
+CREATE TABLE IF NOT EXISTS embeddings (memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+  dim INTEGER NOT NULL, vector BLOB NOT NULL);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("migrating: %w", err)
