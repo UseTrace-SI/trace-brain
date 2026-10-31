@@ -96,13 +96,31 @@ func rememberCmd() *cobra.Command {
 			scope = "project"
 		}
 		now := time.Now().UnixMilli()
-		_, err = db.Exec("INSERT INTO memories(id,scope,content,source,created_at) VALUES(?,?,?,?,?)",
-			id, scope, content, "manual", now)
+		for attempt := 0; attempt < 30; attempt++ {
+			_, err = db.Exec("INSERT INTO memories(id,scope,content,source,created_at) VALUES(?,?,?,?,?)",
+				id, scope, content, "manual", now)
+			if err == nil {
+				break
+			}
+			if !strings.Contains(err.Error(), "database is locked") {
+				return err
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 		if err != nil {
 			return err
 		}
-		_, err = db.Exec("INSERT OR REPLACE INTO embeddings(memory_id,dim,vector) VALUES(?,?,?)",
-			id, embed.Dim, embed.Encode(embed.Embed(content)))
+		for attempt := 0; attempt < 30; attempt++ {
+			_, err = db.Exec("INSERT OR REPLACE INTO embeddings(memory_id,dim,vector) VALUES(?,?,?)",
+				id, embed.Dim, embed.Encode(embed.Embed(content)))
+			if err == nil {
+				break
+			}
+			if !strings.Contains(err.Error(), "database is locked") {
+				return err
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 		if err != nil {
 			return err
 		}
