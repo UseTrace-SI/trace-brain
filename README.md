@@ -29,6 +29,8 @@ describe the checkout when indexed, with their index timestamp.
 
 In an initialized Trace project, new databases default to `.trace/brain/memory.db`. A pre-existing `.trace-brain/memory.db` is retained, and explicit `--db` overrides both. With the binary on the Trace daemon's `PATH`, CLI imports history after completed turns and sessions. `trace context` and MCP `get_context` combine these memories with history and Graph output. Manual memories remain local and survive refresh; another checkout rebuilds derived memories from recovered history. Context treats task words literally, caps results/content, and never creates a missing database or invokes extraction.
 
+Database writers reserve their SQLite write transaction before reading import fingerprints, so concurrent manual saves and daemon refreshes wait rather than fail with a stale-snapshot lock. Concurrent first opens retry transient WAL initialization contention.
+
 `setup` imports sessions and turns transactionally. Repeating it updates the same source entities without creating new memories. `extract` skips unchanged sessions, including external agent calls, and reports failures. Existing duplicates created by older versions are preserved; no historical memories are deleted automatically.
 
 `viz` escapes memory content as text and writes beside the selected `--db`. `query` is an alias in behavior for `recall`.

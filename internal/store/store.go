@@ -2,20 +2,47 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 func Open(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	// Imports read fingerprints before writing. Reserve the writer at BEGIN
+	// so another process cannot invalidate that read snapshot before the write.
+	dsn := path + "?_txlock=immediate"
+	if path != ":memory:" {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		u := url.URL{Scheme: "file", Path: absolute, RawQuery: "_txlock=immediate"}
+		dsn = u.String()
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON"); err != nil {
+	// Concurrent first opens can collide while enabling WAL, before SQLite's
+	// busy handler can wait. Retry only this idempotent initialization step.
+	var initializeErr error
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, initializeErr = db.Exec("PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON")
+		var sqliteError interface{ Code() int }
+		if initializeErr == nil || !errors.As(initializeErr, &sqliteError) || sqliteError.Code()&255 != 5 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if initializeErr != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("initializing database: %w", initializeErr)
 	}
 	if err := migrate(db); err != nil {
 		db.Close()

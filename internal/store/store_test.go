@@ -1,8 +1,11 @@
 package store
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -25,3 +28,31 @@ func TestOpenAndRemember(t *testing.T) {
 	}
 }
 
+func TestConcurrentOpenAndRemember(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shared.db")
+	start := make(chan struct{})
+	errors := make(chan error, 8)
+	var workers sync.WaitGroup
+	for i := 0; i < cap(errors); i++ {
+		workers.Add(1)
+		go func(i int) {
+			defer workers.Done()
+			<-start
+			db, err := Open(path)
+			if err != nil {
+				errors <- fmt.Errorf("open: %w", err)
+				return
+			}
+			defer db.Close()
+			errors <- Remember(context.Background(), db, fmt.Sprintf("memory-%d", i), "project", "concurrent memory", "manual", 1)
+		}(i)
+	}
+	close(start)
+	workers.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+}
