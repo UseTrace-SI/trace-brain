@@ -81,6 +81,13 @@ CREATE TABLE turns(id TEXT,session_id TEXT,seq INTEGER,prompt TEXT,reasoning TEX
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	// External extraction must not hold the writer lock while waiting on a model.
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), time.Second)
+	if _, err := db.ExecContext(writeCtx, "INSERT INTO memories(id,scope,content,created_at) VALUES('during-extract','manual','available',1)"); err != nil {
+		writeCancel()
+		t.Fatalf("extractor blocked an independent writer: %v", err)
+	}
+	writeCancel()
 	cancel()
 	select {
 	case err := <-done:

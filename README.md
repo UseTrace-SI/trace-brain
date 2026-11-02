@@ -2,6 +2,12 @@
 
 Continuous memory layer over Trace history.
 
+The coordinated Trace bundle supplies this executable beside the other two
+local components, with one release version. With an approved personal connection,
+CLI publishes bounded derived context to the hosted dashboard. Raw companion
+SQLite files and manual/MCP-authored Brain notes remain local. Graph snapshots
+describe the checkout when indexed, with their index timestamp.
+
 ## Commands
 - `trace-brain version`
 - `trace-brain status`
@@ -34,3 +40,9 @@ Run `go test -race ./...` and `go test -race -run TestRegression -count=100 ./in
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs pure Go builds, vet, race tests, and 100 repetitions of the regression cases on GitHub-hosted macOS and Linux runners for pushes, pull requests, and manual runs. The workflow has read-only repository access. Hosted execution begins after these changes are pushed.
+
+## Production bounds
+
+Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline and keep at most 50 ranked candidates in memory. Local embeddings are hashed word projections rather than a learned semantic model.
+
+MCP recall/query return at most 50 memories with 2,048 characters of content each. New manual/MCP memories are limited to 64 KiB and save their embedding atomically. Extraction caps stdout at 64 KiB and stderr at 4 KiB, cancels noisy subprocesses, and holds no memory-database transaction while waiting on an external agent. Successful extracted memories commit independently; an error leaves previous successful extractions intact for idempotent retry.

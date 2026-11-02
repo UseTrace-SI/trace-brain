@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -8,7 +9,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
@@ -50,6 +53,10 @@ func contextCmd() *cobra.Command {
 	var limit int
 	var semantic bool
 	cmd := &cobra.Command{Use: "context", Short: "Read bounded memory context as protocol-1 JSON", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+		defer cancel()
+		cmd.SetContext(ctx)
+
 		out := memoryContext{Protocol: 1, Status: "missing_index", Memories: []memoryItem{}}
 		if len(query) > 4096 {
 			return fmt.Errorf("context query exceeds 4096 bytes")
@@ -138,18 +145,21 @@ func contextCmd() *cobra.Command {
 				if v := embed.Decode(vec, embed.Dim); v != nil {
 					score = embed.Cosine(qv, v)
 				}
-				candidates = append(candidates, scored{item: item, score: score})
+				position := sort.Search(len(candidates), func(i int) bool { return candidates[i].score < score })
+				if position < limit {
+					candidates = append(candidates, scored{})
+					copy(candidates[position+1:], candidates[position:])
+					candidates[position] = scored{item: item, score: score}
+					if len(candidates) > limit {
+						candidates = candidates[:limit]
+					}
+				}
 			}
 			rows.Close()
 			if err := rows.Err(); err != nil {
 				return err
 			}
 			// Sort by score desc, then created_at desc.
-			for i := 1; i < len(candidates); i++ {
-				for j := i; j > 0 && candidates[j-1].score < candidates[j].score; j-- {
-					candidates[j-1], candidates[j] = candidates[j], candidates[j-1]
-				}
-			}
 			if limit > len(candidates) {
 				limit = len(candidates)
 			}

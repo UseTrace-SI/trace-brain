@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -47,8 +48,7 @@ func (s *Server) remember(ctx context.Context, req *mcp.CallToolRequest, in reme
 		scope = "project"
 	}
 	id := fmt.Sprintf("mem-%d", time.Now().UnixNano())
-	_, err := s.DB.Exec("INSERT INTO memories(id,scope,content,source,created_at) VALUES(?,?,?,?,?)",
-		id, scope, in.Content, "mcp", time.Now().UnixMilli())
+	err := store.Remember(ctx, s.DB, id, scope, in.Content, "mcp", time.Now().UnixMilli())
 	if err != nil {
 		return nil, rememberOutput{}, err
 	}
@@ -64,11 +64,15 @@ type recallOutput struct {
 }
 
 func (s *Server) recall(ctx context.Context, req *mcp.CallToolRequest, in recallInput) (*mcp.CallToolResult, recallOutput, error) {
-	if in.Limit < 1 {
+	if in.Limit < 1 || in.Limit > 50 {
 		in.Limit = 20
 	}
-	rows, err := s.DB.Query(`SELECT m.id,m.scope,m.content,m.created_at FROM memories m
-		JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?`, in.Query, in.Limit)
+	query, err := store.LiteralQuery(in.Query)
+	if err != nil {
+		return nil, recallOutput{}, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT m.id,m.scope,substr(m.content,1,2048),m.created_at FROM memories m
+		JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?`, query, in.Limit)
 	if err != nil {
 		return nil, recallOutput{}, err
 	}
@@ -85,8 +89,6 @@ func (s *Server) recall(ctx context.Context, req *mcp.CallToolRequest, in recall
 	return nil, recallOutput{Memories: out}, rows.Err()
 }
 
-
-
 type queryInput struct {
 	Query string `json:"query"`
 	Limit int    `json:"limit,omitempty"`
@@ -94,16 +96,27 @@ type queryInput struct {
 type queryOutput struct {
 	Memories []map[string]any `json:"memories"`
 }
+
 func (s *Server) query(ctx context.Context, req *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, queryOutput, error) {
-	if in.Limit < 1 { in.Limit = 20 }
-	rows, err := s.DB.Query(`SELECT m.id,m.scope,m.content,m.created_at FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?`, in.Query, in.Limit)
-	if err != nil { return nil, queryOutput{}, err }
+	if in.Limit < 1 || in.Limit > 50 {
+		in.Limit = 20
+	}
+	query, err := store.LiteralQuery(in.Query)
+	if err != nil {
+		return nil, queryOutput{}, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT m.id,m.scope,substr(m.content,1,2048),m.created_at FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?`, query, in.Limit)
+	if err != nil {
+		return nil, queryOutput{}, err
+	}
 	defer rows.Close()
 	var out []map[string]any
 	for rows.Next() {
 		var id, scope, content string
 		var created int64
-		if err := rows.Scan(&id, &scope, &content, &created); err != nil { return nil, queryOutput{}, err }
+		if err := rows.Scan(&id, &scope, &content, &created); err != nil {
+			return nil, queryOutput{}, err
+		}
 		out = append(out, map[string]any{"id": id, "scope": scope, "content": content, "created_at": created})
 	}
 	return nil, queryOutput{Memories: out}, rows.Err()
@@ -115,14 +128,23 @@ type briefInput struct {
 type briefOutput struct {
 	Items []string `json:"items"`
 }
+
 func (s *Server) brief(ctx context.Context, req *mcp.CallToolRequest, in briefInput) (*mcp.CallToolResult, briefOutput, error) {
-	rows, err := s.DB.Query(`SELECT m.content FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? LIMIT 10`, in.Task)
-	if err != nil { return nil, briefOutput{}, err }
+	query, err := store.LiteralQuery(in.Task)
+	if err != nil {
+		return nil, briefOutput{}, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT substr(m.content,1,2048) FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? LIMIT 10`, query)
+	if err != nil {
+		return nil, briefOutput{}, err
+	}
 	defer rows.Close()
 	var items []string
 	for rows.Next() {
 		var c string
-		if err := rows.Scan(&c); err == nil { items = append(items, c) }
+		if err := rows.Scan(&c); err == nil {
+			items = append(items, c)
+		}
 	}
 	return nil, briefOutput{Items: items}, rows.Err()
 }
@@ -130,14 +152,14 @@ func (s *Server) brief(ctx context.Context, req *mcp.CallToolRequest, in briefIn
 type overviewOutput struct {
 	Memories int `json:"memories"`
 }
+
 func (s *Server) overview(ctx context.Context, req *mcp.CallToolRequest, in struct{}) (*mcp.CallToolResult, overviewOutput, error) {
 	var n int
-	if err := s.DB.QueryRow("SELECT COUNT(*) FROM memories").Scan(&n); err != nil {
+	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM memories").Scan(&n); err != nil {
 		return nil, overviewOutput{}, err
 	}
 	return nil, overviewOutput{Memories: n}, nil
 }
-
 
 type statusOutput struct {
 	Memories int `json:"memories"`
@@ -145,9 +167,8 @@ type statusOutput struct {
 
 func (s *Server) status(ctx context.Context, req *mcp.CallToolRequest, in struct{}) (*mcp.CallToolResult, statusOutput, error) {
 	var n int
-	if err := s.DB.QueryRow("SELECT COUNT(*) FROM memories").Scan(&n); err != nil {
+	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM memories").Scan(&n); err != nil {
 		return nil, statusOutput{}, err
 	}
 	return nil, statusOutput{Memories: n}, nil
 }
-

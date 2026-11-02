@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -37,11 +38,14 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 		return err
 	}
 	defer db.Close()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	var tx *sql.Tx
+	if !extract {
+		tx, err = db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
 	}
-	defer tx.Rollback()
 	source := "trace-import"
 	if extract {
 		source = "agent-extract"
@@ -49,7 +53,12 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 	save := func(kind, entityID, sid, tid, content string) (bool, error) {
 		fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(content+"\x00"+agentCmd)))
 		var old string
-		err := tx.QueryRowContext(ctx, "SELECT fingerprint FROM memory_imports WHERE source_db=? AND source=? AND entity_kind=? AND entity_id=?", path, source, kind, entityID).Scan(&old)
+		var err error
+		if extract {
+			err = db.QueryRowContext(ctx, "SELECT fingerprint FROM memory_imports WHERE source_db=? AND source=? AND entity_kind=? AND entity_id=?", path, source, kind, entityID).Scan(&old)
+		} else {
+			err = tx.QueryRowContext(ctx, "SELECT fingerprint FROM memory_imports WHERE source_db=? AND source=? AND entity_kind=? AND entity_id=?", path, source, kind, entityID).Scan(&old)
+		}
 		if err != nil && err != sql.ErrNoRows {
 			return false, err
 		}
@@ -73,25 +82,51 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 			}
 			c.WaitDelay = time.Second
 			c.Stdin = strings.NewReader("Extract a concise memory (one sentence) about this session: " + content)
-			output, err := c.Output()
+			output := &extractBuffer{limit: 65536, cancel: cancel}
+			stderr := &extractBuffer{limit: 4096, cancel: cancel}
+			c.Stdout = output
+			c.Stderr = stderr
+			err := c.Run()
+			if output.exceeded || stderr.exceeded {
+				return false, fmt.Errorf("extracting session %s: output exceeds limit", sid)
+			}
 			if err != nil {
 				return false, fmt.Errorf("extracting session %s: %w", sid, err)
 			}
-			content = strings.TrimSpace(string(output))
+			content = strings.TrimSpace(output.String())
 			if content == "" {
 				return false, fmt.Errorf("extracting session %s: empty response", sid)
 			}
 		}
+		writeTx := tx
+		if extract {
+			writeTx, err = db.BeginTx(ctx, nil)
+			if err != nil {
+				return false, err
+			}
+			defer writeTx.Rollback()
+		}
 		id := fmt.Sprintf("import-%x", sha256.Sum256([]byte(path+"\x00"+source+"\x00"+kind+"\x00"+entityID)))
-		if _, err := tx.ExecContext(ctx, `INSERT INTO memories(id,scope,content,source,session_id,turn_id,created_at) VALUES(?,?,?,?,?,?,?)
+		if _, err := writeTx.ExecContext(ctx, `INSERT INTO memories(id,scope,content,source,session_id,turn_id,created_at) VALUES(?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET content=excluded.content`, id, kind, content, source, sid, tid, time.Now().UnixMilli()); err != nil {
 			return false, err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO memory_imports(source_db,source,entity_kind,entity_id,fingerprint,memory_id) VALUES(?,?,?,?,?,?)
+		_, err = writeTx.ExecContext(ctx, `INSERT INTO memory_imports(source_db,source,entity_kind,entity_id,fingerprint,memory_id) VALUES(?,?,?,?,?,?)
 ON CONFLICT(source_db,source,entity_kind,entity_id) DO UPDATE SET fingerprint=excluded.fingerprint,memory_id=excluded.memory_id`, path, source, kind, entityID, fingerprint, id)
-		_, _ = tx.ExecContext(ctx, `INSERT OR REPLACE INTO embeddings(memory_id,dim,vector) VALUES(?,?,?)`,
+		if err != nil {
+			return false, err
+		}
+		_, err = writeTx.ExecContext(ctx, `INSERT OR REPLACE INTO embeddings(memory_id,dim,vector) VALUES(?,?,?)`,
 			id, embed.Dim, embed.Encode(embed.Embed(content)))
-		return err == nil, err
+		if err != nil {
+			return false, err
+		}
+		if extract {
+			if err = writeTx.Commit(); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
 	}
 	rows, err := src.QueryContext(ctx, "SELECT id, agent, worktree, started_at FROM sessions")
 	if err != nil {
@@ -153,8 +188,10 @@ ON CONFLICT(source_db,source,entity_kind,entity_id) DO UPDATE SET fingerprint=ex
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return err
+	if !extract {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 	if extract {
 		_, err = fmt.Fprintf(out, "extracted %d memories\n", sessions)
@@ -162,4 +199,21 @@ ON CONFLICT(source_db,source,entity_kind,entity_id) DO UPDATE SET fingerprint=ex
 		_, err = fmt.Fprintf(out, "imported %d sessions\nimported %d turns\n", sessions, turns)
 	}
 	return err
+}
+
+// Stop a noisy subprocess before it can exhaust the watcher process.
+type extractBuffer struct {
+	bytes.Buffer
+	limit    int
+	cancel   context.CancelFunc
+	exceeded bool
+}
+
+func (b *extractBuffer) Write(p []byte) (int, error) {
+	if len(p) > b.limit-b.Len() {
+		b.exceeded = true
+		b.cancel()
+		return 0, fmt.Errorf("extraction output limit exceeded")
+	}
+	return b.Buffer.Write(p)
 }

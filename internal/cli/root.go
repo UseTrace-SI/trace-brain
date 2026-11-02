@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/UseTrace-SI/trace-brain/internal/embed"
 	"github.com/UseTrace-SI/trace-brain/internal/mcp"
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/spf13/cobra"
@@ -54,15 +53,18 @@ func Execute() error {
 }
 
 func openDB() (*sql.DB, error) {
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		return nil, err
 	}
 	return store.Open(dbPath)
 }
 
+// Version is set by the coordinated Trace bundle build.
+var Version = "dev"
+
 func versionCmd() *cobra.Command {
 	return &cobra.Command{Use: "version", Run: func(cmd *cobra.Command, args []string) {
-		fmt.Fprintln(cmd.OutOrStdout(), "trace-brain dev")
+		fmt.Fprintln(cmd.OutOrStdout(), "trace-brain "+Version)
 	}}
 }
 
@@ -95,33 +97,7 @@ func rememberCmd() *cobra.Command {
 		if scope == "" {
 			scope = "project"
 		}
-		now := time.Now().UnixMilli()
-		for attempt := 0; attempt < 30; attempt++ {
-			_, err = db.Exec("INSERT INTO memories(id,scope,content,source,created_at) VALUES(?,?,?,?,?)",
-				id, scope, content, "manual", now)
-			if err == nil {
-				break
-			}
-			if !strings.Contains(err.Error(), "database is locked") {
-				return err
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		if err != nil {
-			return err
-		}
-		for attempt := 0; attempt < 30; attempt++ {
-			_, err = db.Exec("INSERT OR REPLACE INTO embeddings(memory_id,dim,vector) VALUES(?,?,?)",
-				id, embed.Dim, embed.Encode(embed.Embed(content)))
-			if err == nil {
-				break
-			}
-			if !strings.Contains(err.Error(), "database is locked") {
-				return err
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		if err != nil {
+		if err := store.Remember(cmd.Context(), db, id, scope, content, "manual", time.Now().UnixMilli()); err != nil {
 			return err
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "remembered %s\n", id)
@@ -133,13 +109,16 @@ func rememberCmd() *cobra.Command {
 
 func recallCmd() *cobra.Command {
 	return &cobra.Command{Use: "recall <query>", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		q := strings.Join(args, " ")
+		q, err := store.LiteralQuery(strings.Join(args, " "))
+		if err != nil {
+			return err
+		}
 		db, err := openDB()
 		if err != nil {
 			return err
 		}
 		defer db.Close()
-		rows, err := db.Query(`SELECT m.id,m.scope,m.content,m.created_at FROM memories m
+		rows, err := db.QueryContext(cmd.Context(), `SELECT m.id,m.scope,substr(m.content,1,2048),m.created_at FROM memories m
 			JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY m.created_at DESC LIMIT 20`, q)
 		if err != nil {
 			return err
@@ -180,13 +159,16 @@ func overviewCmd() *cobra.Command {
 
 func briefCmd() *cobra.Command {
 	return &cobra.Command{Use: "brief <task>", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		q := strings.Join(args, " ")
+		q, err := store.LiteralQuery(strings.Join(args, " "))
+		if err != nil {
+			return err
+		}
 		db, err := openDB()
 		if err != nil {
 			return err
 		}
 		defer db.Close()
-		rows, err := db.Query(`SELECT m.content FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? LIMIT 10`, q)
+		rows, err := db.QueryContext(cmd.Context(), `SELECT substr(m.content,1,2048) FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? LIMIT 10`, q)
 		if err != nil {
 			return err
 		}
