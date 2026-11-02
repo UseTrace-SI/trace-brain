@@ -2,10 +2,12 @@ module github.com/UseTrace-SI/trace-brain
 
 go 1.26.0
 
+toolchain go1.27.3
+
 require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/spf13/cobra v1.10.2
-	modernc.org/sqlite v1.61.0
+	modernc.org/sqlite v1.61.1
 )
 
 require (
