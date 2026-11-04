@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
+	"github.com/UseTrace-SI/trace-brain/internal/redact"
 )
 
 // LiteralQuery treats task text as words rather than FTS operators.
@@ -32,6 +33,7 @@ func Remember(ctx context.Context, db *sql.DB, id, scope, content, source string
 	if strings.TrimSpace(content) == "" || len(content) > 65536 || len(scope) > 1024 {
 		return fmt.Errorf("memory must contain 1–65536 bytes and scope at most 1024 bytes")
 	}
+	content = (redact.Redactor{}).Text(content)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

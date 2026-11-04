@@ -119,7 +119,7 @@ func recallCmd() *cobra.Command {
 		}
 		defer db.Close()
 		rows, err := db.QueryContext(cmd.Context(), `SELECT m.id,m.scope,substr(m.content,1,2048),m.created_at FROM memories m
-			JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY m.created_at DESC LIMIT 20`, q)
+			JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT 20`, q)
 		if err != nil {
 			return err
 		}
@@ -168,7 +168,7 @@ func briefCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		rows, err := db.QueryContext(cmd.Context(), `SELECT substr(m.content,1,2048) FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? LIMIT 10`, q)
+		rows, err := db.QueryContext(cmd.Context(), `SELECT substr(m.content,1,2048) FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT 10`, q)
 		if err != nil {
 			return err
 		}

@@ -145,7 +145,12 @@ func contextCmd() *cobra.Command {
 				if v := embed.Decode(vec, embed.Dim); v != nil {
 					score = embed.Cosine(qv, v)
 				}
-				position := sort.Search(len(candidates), func(i int) bool { return candidates[i].score < score })
+				if score <= 0 {
+					continue
+				}
+				position := sort.Search(len(candidates), func(i int) bool {
+					return candidates[i].score < score || (candidates[i].score == score && candidates[i].item.CreatedAt < item.CreatedAt)
+				})
 				if position < limit {
 					candidates = append(candidates, scored{})
 					copy(candidates[position+1:], candidates[position:])
@@ -179,7 +184,11 @@ func contextCmd() *cobra.Command {
 				q += ` AND (m.source IN ('manual','mcp') OR EXISTS(SELECT 1 FROM memory_imports i WHERE i.memory_id=m.id AND i.source_db=?))`
 				args = append(args, source)
 			}
-			q += ` ORDER BY m.created_at DESC,m.id LIMIT ?`
+			if len(words) > 0 {
+				q += ` ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT ?`
+			} else {
+				q += ` ORDER BY m.created_at DESC,m.id LIMIT ?`
+			}
 			args = append(args, limit)
 			rows, err := db.QueryContext(cmd.Context(), q, args...)
 			if err != nil {

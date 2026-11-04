@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
+	"github.com/UseTrace-SI/trace-brain/internal/redact"
 )
 
 func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extract bool) error {
@@ -46,11 +47,22 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 		}
 		defer tx.Rollback()
 	}
+	if !extract {
+		if _, err := tx.ExecContext(ctx, "CREATE TEMP TABLE IF NOT EXISTS import_seen(kind TEXT,id TEXT,PRIMARY KEY(kind,id)); DELETE FROM import_seen"); err != nil {
+			return err
+		}
+	}
 	source := "trace-import"
 	if extract {
 		source = "agent-extract"
 	}
 	save := func(kind, entityID, sid, tid, content string) (bool, error) {
+		if !extract {
+			if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO import_seen VALUES(?,?)", kind, entityID); err != nil {
+				return false, err
+			}
+		}
+		content = (redact.Redactor{}).Text(content)
 		fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(content+"\x00"+agentCmd)))
 		var old string
 		var err error
@@ -93,7 +105,7 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 			if err != nil {
 				return false, fmt.Errorf("extracting session %s: %w", sid, err)
 			}
-			content = strings.TrimSpace(output.String())
+			content = (redact.Redactor{}).Text(strings.TrimSpace(output.String()))
 			if content == "" {
 				return false, fmt.Errorf("extracting session %s: empty response", sid)
 			}
@@ -141,6 +153,14 @@ ON CONFLICT(source_db,source,entity_kind,entity_id) DO UPDATE SET fingerprint=ex
 			return err
 		}
 		content := fmt.Sprintf("Session %s: agent=%s worktree=%s started=%d", sid, agent, worktree, started)
+		if extract {
+			evidence, err := sessionEvidence(ctx, src, sid, agent, started)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			content = evidence
+		}
 		changed, err := save("sessions", sid, sid, "", content)
 		if err != nil {
 			rows.Close()
@@ -189,6 +209,12 @@ ON CONFLICT(source_db,source,entity_kind,entity_id) DO UPDATE SET fingerprint=ex
 		}
 	}
 	if !extract {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE id IN (SELECT i.memory_id FROM memory_imports i WHERE i.source_db=? AND i.source='trace-import' AND NOT EXISTS(SELECT 1 FROM import_seen s WHERE s.kind=i.entity_kind AND s.id=i.entity_id))`, path); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM memory_imports WHERE source_db=? AND source='trace-import' AND NOT EXISTS(SELECT 1 FROM memories m WHERE m.id=memory_imports.memory_id)", path); err != nil {
+			return err
+		}
 		if err := tx.Commit(); err != nil {
 			return err
 		}
