@@ -11,6 +11,12 @@ func TestKnownSecrets(t *testing.T) {
 		{"github", "ghp_abcdefghijklmnopqrstuvwxyz012345"},
 		{"openai", "sk-abcdefghijklmnopqrstuvwxyz012345"},
 		{"env", "API_TOKEN=abcdefghijklmnopqrstuvwxyz012345"},
+		{"unicode folded context", "ſecret value 7dF2aQ9mR4xT8vL1pN6cY3zB5kH0sW2u"},
+		{"private key", "-----BEGIN PRIVATE KEY-----\nmaterial\n-----END PRIVATE KEY-----"},
+		{"slack", "xoxb-1234567890-abcdefghij"},
+		{"stripe", "sk_live_abcdefghijklmnop123456"},
+		{"jwt", "eyJabcdefghij.eyJabcdefghij.abcdefghijk"},
+		{"URL password", "postgres://user:password@example.invalid/db"},
 		{"entropy", "api value 7dF2aQ9mR4xT8vL1pN6cY3zB5kH0sW2u"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -19,6 +25,13 @@ func TestKnownSecrets(t *testing.T) {
 				t.Fatalf("unredacted: %q", got)
 			}
 		})
+	}
+}
+
+func TestLargeUnrelatedTextIsUnchanged(t *testing.T) {
+	value := strings.Repeat("x", 1<<20)
+	if got := (Redactor{}).Text(value); got != value {
+		t.Fatal("unrelated large text changed")
 	}
 }
 

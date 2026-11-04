@@ -24,6 +24,19 @@ var patterns = []struct {
 	{"url-password", regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s:/@]+:[^\s@/]+@`)},
 }
 
+// Necessary literal fragments cheaply rule out patterns before invoking the
+// regexp engine on large transcripts. A fragment alone never causes redaction.
+var patternHints = map[string][]string{
+	"private-key":  {"PRIVATE KEY-----"},
+	"aws-key":      {"AKIA", "ASIA"},
+	"github-token": {"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"},
+	"slack-token":  {"xox"},
+	"stripe-key":   {"sk_", "rk_"},
+	"jwt":          {"eyJ"},
+	"api-key":      {"sk-"},
+	"url-password": {"://"},
+}
+
 var envValue = regexp.MustCompile(`(?im)\b[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_]*\s*[:=]\s*(["']?[^\s,"']+["']?)`)
 var redactionMarker = regexp.MustCompile(`⟨redacted:[a-z-]+:[0-9a-f]{8}⟩`)
 var email = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`)
@@ -41,11 +54,27 @@ func (r Redactor) Text(s string) string {
 		return s
 	}
 	for _, p := range patterns {
+		possible := false
+		for _, hint := range patternHints[p.kind] {
+			if strings.Contains(s, hint) {
+				possible = true
+				break
+			}
+		}
+		if !possible {
+			continue
+		}
 		s = p.rx.ReplaceAllStringFunc(s, func(v string) string { return marker(p.kind, v) })
 	}
-	s = redactEnvValues(s)
+	context := hasKeyContext(s)
+	if context {
+		s = redactEnvValues(s)
+	}
 	original := s
-	indexes := candidate.FindAllStringIndex(original, -1)
+	var indexes [][]int
+	if context {
+		indexes = candidate.FindAllStringIndex(original, -1)
+	}
 	for i := len(indexes) - 1; i >= 0; i-- {
 		start, end := indexes[i][0], indexes[i][1]
 		from := start - 30
@@ -65,7 +94,24 @@ func (r Redactor) Text(s string) string {
 	return s
 }
 
+func hasKeyContext(s string) bool {
+	lower := strings.ToLower(s)
+	for _, word := range []string{"key", "secret", "token", "password", "passwd", "api"} {
+		if strings.Contains(lower, word) {
+			return true
+		}
+	}
+	// Unicode case-insensitive regular expressions also fold long s to S.
+	return strings.ContainsRune(s, '\u017f') && keyContext.MatchString(s)
+}
+
 func redactEnvValues(s string) string {
+	// Every environment assignment requires a separator. Avoid the expensive
+	// case-insensitive name matcher on large source/transcript strings without
+	// one; this preserves exactly the same redaction behavior.
+	if !strings.ContainsAny(s, "=:") {
+		return s
+	}
 	matches := envValue.FindAllStringIndex(s, -1)
 	if len(matches) == 0 {
 		return s
