@@ -72,7 +72,7 @@ func (s *Server) recall(ctx context.Context, req *mcp.CallToolRequest, in recall
 		return nil, recallOutput{}, err
 	}
 	rows, err := s.DB.QueryContext(ctx, `SELECT m.id,m.scope,substr(m.content,1,2048),m.created_at FROM memories m
-		JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?`, query, in.Limit)
+		JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT ?`, query, in.Limit)
 	if err != nil {
 		return nil, recallOutput{}, err
 	}
@@ -105,7 +105,7 @@ func (s *Server) query(ctx context.Context, req *mcp.CallToolRequest, in queryIn
 	if err != nil {
 		return nil, queryOutput{}, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT m.id,m.scope,substr(m.content,1,2048),m.created_at FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?`, query, in.Limit)
+	rows, err := s.DB.QueryContext(ctx, `SELECT m.id,m.scope,substr(m.content,1,2048),m.created_at FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT ?`, query, in.Limit)
 	if err != nil {
 		return nil, queryOutput{}, err
 	}
@@ -134,7 +134,7 @@ func (s *Server) brief(ctx context.Context, req *mcp.CallToolRequest, in briefIn
 	if err != nil {
 		return nil, briefOutput{}, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT substr(m.content,1,2048) FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? LIMIT 10`, query)
+	rows, err := s.DB.QueryContext(ctx, `SELECT substr(m.content,1,2048) FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT 10`, query)
 	if err != nil {
 		return nil, briefOutput{}, err
 	}

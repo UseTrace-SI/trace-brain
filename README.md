@@ -31,7 +31,7 @@ In an initialized Trace project, new databases default to `.trace/brain/memory.d
 
 Database writers reserve their SQLite write transaction before reading import fingerprints, so concurrent manual saves and daemon refreshes wait rather than fail with a stale-snapshot lock. Concurrent first opens retry transient WAL initialization contention.
 
-`setup` imports sessions and turns transactionally. Repeating it updates the same source entities without creating new memories. `extract` skips unchanged sessions, including external agent calls, and reports failures. Existing duplicates created by older versions are preserved; no historical memories are deleted automatically.
+`setup` imports sessions and turns transactionally. Repeating it updates the same source entities without creating new memories. `extract` skips unchanged sessions, including external agent calls, and reports failures. Existing unlinked duplicates created by older versions are preserved. Refresh removes derived `trace-import` memories whose source entity was deleted; manual/MCP notes are retained.
 
 `viz` escapes memory content as text and writes beside the selected `--db`. `query` is an alias in behavior for `recall`.
 
@@ -50,3 +50,18 @@ Ordinary search text is interpreted as literal words, including punctuation. Con
 MCP recall/query return at most 50 memories with 2,048 characters of content each. New manual/MCP memories are limited to 64 KiB and save their embedding atomically. Extraction caps stdout at 64 KiB and stderr at 4 KiB, cancels noisy subprocesses, and holds no memory-database transaction while waiting on an external agent. Successful extracted memories commit independently; an error leaves previous successful extractions intact for idempotent retry.
 
 Production builds select Go 1.27.3 to include the patched certificate verifier. CI pins this compiler and runs Govulncheck. The language version remains Go 1.26; release builds reject a different compiler. Existing runtime dependencies are pinned to their reviewed updates in go.mod/go.sum.
+
+## Extraction and retrieval quality
+
+Extraction now receives up to 32 recent turns and 50 file-change observations,
+within 48 KiB of structured evidence. It includes recorded responses and turn
+IDs, treats quoted text as untrusted data and fingerprints the sampled evidence,
+so changed outcomes invalidate an earlier extraction. The extractor must not infer
+a successful test merely from an intention to run it. All imported, extracted,
+manual and MCP memory content passes through secret-pattern redaction before storage.
+
+Keyword retrieval ranks by SQLite FTS relevance with deterministic recency ties.
+The optional hashed-word ranker omits zero-overlap results; it remains a lexical
+fallback. Quality regressions cover relevant older evidence outranking recent
+weak matches, changed extraction inputs, output redaction and deleted-source
+cleanup. Source/session/turn provenance remains present in context responses.
