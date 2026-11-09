@@ -5,8 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"math"
-	"sort"
 	"strings"
 	"time"
 
@@ -18,13 +16,8 @@ import (
 
 func textFingerprint(text string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(text))) }
 
-type modelProvider interface {
-	Origin() string
-	Digest(context.Context, string) (string, error)
-	Embed(context.Context, string, []string) ([][]float32, error)
-	Close()
-}
-type modelFactory func(string) (modelProvider, error)
+type modelProvider = semantic.Provider
+type modelFactory = semantic.Factory
 
 func localModelProvider(endpoint string) (modelProvider, error) { return semantic.NewOllama(endpoint) }
 
@@ -163,15 +156,9 @@ func semanticCmd(factory modelFactory) *cobra.Command {
 	var limit int
 	var minScore float64
 	cmd := &cobra.Command{Use: "semantic <query>", Short: "Search learned vectors using an explicitly selected local Ollama model", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		query := strings.Join(args, " ")
-		if len(query) > 4096 || strings.TrimSpace(query) == "" {
-			return fmt.Errorf("query must contain 1–4096 bytes")
-		}
-		if limit < 1 || limit > 50 {
-			return fmt.Errorf("limit must be 1–50")
-		}
-		if math.IsNaN(minScore) || math.IsInf(minScore, 0) || minScore < -1 || minScore > 1 {
-			return fmt.Errorf("min-score must be between -1 and 1")
+		in := semantic.SearchRequest{Query: strings.Join(args, " "), Scope: scope, Model: model, Limit: limit, MinScore: minScore}
+		if err := semantic.ValidateSearch(in); err != nil {
+			return err
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
 		defer cancel()
@@ -185,86 +172,11 @@ func semanticCmd(factory modelFactory) *cobra.Command {
 			return err
 		}
 		defer provider.Close()
-		digest, err := provider.Digest(ctx, model)
+		out, err := semantic.Search(ctx, db, provider, in)
 		if err != nil {
 			return err
 		}
-		vectors, err := provider.Embed(ctx, model, []string{(redact.Redactor{}).Text(query)})
-		if err != nil {
-			return err
-		}
-		current, err := provider.Digest(ctx, model)
-		if err != nil {
-			return err
-		}
-		if current != digest {
-			return fmt.Errorf("model digest changed while embedding the query")
-		}
-		q := `SELECT m.id,m.scope,substr(m.content,1,2048),COALESCE(m.source,''),COALESCE(m.session_id,''),COALESCE(m.turn_id,''),m.created_at,substr(m.content,1,65537),COALESCE(e.content_hash,''),COALESCE(e.dim,0),substr(e.vector,1,32769) FROM memories m LEFT JOIN semantic_embeddings e ON e.memory_id=m.id AND e.endpoint=? AND e.model=? AND e.digest=? WHERE 1=1`
-		params := []any{provider.Origin(), model, digest}
-		if scope != "" {
-			q += " AND m.scope=?"
-			params = append(params, scope)
-		}
-		q += " ORDER BY m.id"
-		rows, err := db.QueryContext(ctx, q, params...)
-		if err != nil {
-			return err
-		}
-		type result struct {
-			memoryItem
-			Score float64 `json:"score"`
-		}
-		results := []result{}
-		stale, valid, missing := 0, 0, 0
-		for rows.Next() {
-			var item memoryItem
-			var content, hash string
-			var dim int
-			var vector []byte
-			if err := rows.Scan(&item.ID, &item.Scope, &item.Content, &item.Source, &item.SessionID, &item.TurnID, &item.CreatedAt, &content, &hash, &dim, &vector); err != nil {
-				rows.Close()
-				return err
-			}
-			if hash == "" {
-				missing++
-				continue
-			}
-			if len(content) > 65536 || hash != textFingerprint(content) || dim != len(vectors[0]) || len(vector) != dim*4 {
-				stale++
-				continue
-			}
-			score := embed.Cosine(vectors[0], embed.Decode(vector, dim))
-			if math.IsNaN(score) || math.IsInf(score, 0) {
-				stale++
-				continue
-			}
-			valid++
-			if score < minScore {
-				continue
-			}
-			position := sort.Search(len(results), func(i int) bool {
-				return results[i].Score < score || (results[i].Score == score && (results[i].CreatedAt < item.CreatedAt || (results[i].CreatedAt == item.CreatedAt && results[i].ID > item.ID)))
-			})
-			if position < limit {
-				results = append(results, result{})
-				copy(results[position+1:], results[position:])
-				results[position] = result{memoryItem: item, Score: score}
-				if len(results) > limit {
-					results = results[:limit]
-				}
-			}
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		status := "ready"
-		if valid == 0 {
-			status = "needs_embeddings"
-		}
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "status": status, "model": model, "model_digest": digest, "stale_vectors": stale, "missing_vectors": missing, "indexed_memories": valid, "memories": results})
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 	}}
 	cmd.Flags().StringVar(&model, "model", "", "exact installed Ollama model name (required)")
 	cmd.Flags().StringVar(&endpoint, "endpoint", "http://127.0.0.1:11434", "local Ollama origin; remote endpoints and redirects are refused")

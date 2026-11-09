@@ -29,7 +29,7 @@ describe the checkout when indexed, with their index timestamp.
 - `trace-brain brief <task>`
 - `trace-brain setup [trace.db]` (import sessions from Trace)
 - `trace-brain doctor`
-- `trace-brain mcp` (MCP stdio server)
+- `trace-brain mcp [--semantic-model EXACT_INSTALLED_MODEL] [--semantic-endpoint LOCAL_ORIGIN]` (MCP stdio server; learned search defaults off)
 - `trace-brain refresh [--trace-db .trace/trace.db]` (import and return protocol-1 JSON)
 - `trace-brain context [--query words] [--limit 20]` (bounded, read-only protocol-1 JSON)
 
@@ -105,9 +105,33 @@ Cached vectors are tied to the endpoint, model name, observed model digest and
 memory-content hash. Detected digest changes during inference abort that batch;
 changed/deleted memories cannot receive an obsolete vector. Semantic queries
 report missing/stale vectors and omit them from ranking. Updating or forgetting
-a memory invalidates/removes its learned vectors. Ordinary context/MCP reads do
-not contact a model. Protocol, cache and ranking paths have offline tests; live
+a memory invalidates/removes its learned vectors. Ordinary context and MCP
+recall/query reads do not contact a model. Protocol, cache and ranking paths have offline tests; live
 Ollama acceptance and retrieval-quality benchmarks remain outstanding.
+
+To expose learned retrieval to an agent, start
+`trace-brain mcp --semantic-model EXACT_INSTALLED_MODEL`. The owner pins the exact
+installed model and loopback endpoint at startup. This registers the read-only
+`brain_semantic` tool; callers can select query, scope, limit and minimum score,
+but cannot change the provider or model. Startup and tool discovery do not contact
+Ollama. The tool embeds only its redacted query and reads existing vectors; it
+never indexes memories, downloads models or changes caches. Use the explicit
+`embed` command first to prepare vectors. There is no automatic keyword fallback
+when learned search fails or needs embeddings.
+
+CLI and MCP learned queries share scope filtering, identity checks and deterministic
+score/recency/ID ranking. Both have a one-minute deadline, a 4 KiB UTF-8 query limit,
+256-byte scope/provenance bounds, at most 100,000 scanned memories, 1–50 requested
+results, UTF-8-safe redacted 2 KiB content snippets and a 64 KiB encoded result
+budget. Content and result truncation are explicit. Oversized scans and malformed
+provenance fail without returning a partial ranking. The learned read reports
+`needs_embeddings` for a missing vector table without migrating it. Ordinary MCP
+startup retains its existing schema initialization and memory-write tools. Invalid and
+zero-norm stored vectors are stale. The MCP server admits one learned query at a
+time and rejects overlapping inference; cancellation releases its slot. Private
+backend error details are not forwarded through MCP. Returned memory content is
+untrusted quoted evidence, not instructions or a truth certification. Learned
+context aggregation and live installed-model quality/latency acceptance remain open.
 
 ## Local document sources
 

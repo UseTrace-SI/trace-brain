@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/UseTrace-SI/trace-brain/internal/mcp"
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -35,7 +34,7 @@ func newRootWithModelProvider(factory modelFactory) *cobra.Command {
 	}
 	root.AddCommand(versionCmd())
 	root.AddCommand(&cobra.Command{Use: "capabilities", Short: "Report retrieval modes and network policy without probing services", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "retrieval": map[string]any{"default": "sqlite_bm25", "legacy_semantic_flag": "hashed_words", "learned": "explicit_local_ollama", "model_service": "not_probed"}, "context_network": false, "memory_lifecycle": []string{"get", "update", "history", "forget", "verify_references"}, "workspace_retrieval": "explicit_read_only_databases", "documents": map[string]any{"sources": "explicit_local_text", "remote_connectors": false, "hosted_publication": false}, "facts": map[string]any{"input": "explicit_evidence_linked_claims", "temporal": "validity_and_recorded_time", "evidence": "current_or_captured_hash", "captured_evidence_budget_bytes": 33554432, "automatic_extraction": false, "source_verified": false}})
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "retrieval": map[string]any{"default": "sqlite_bm25", "legacy_semantic_flag": "hashed_words", "learned": "explicit_local_ollama", "model_service": "not_probed", "mcp_learned": "owner_opt_in_pinned_local_model", "mcp_learned_default": false}, "context_network": false, "memory_lifecycle": []string{"get", "update", "history", "forget", "verify_references"}, "workspace_retrieval": "explicit_read_only_databases", "documents": map[string]any{"sources": "explicit_local_text", "remote_connectors": false, "hosted_publication": false}, "facts": map[string]any{"input": "explicit_evidence_linked_claims", "temporal": "validity_and_recorded_time", "evidence": "current_or_captured_hash", "captured_evidence_budget_bytes": 33554432, "automatic_extraction": false, "source_verified": false}})
 	}})
 	root.AddCommand(statusCmd())
 	root.AddCommand(rememberCmd())
@@ -60,7 +59,7 @@ func newRootWithModelProvider(factory modelFactory) *cobra.Command {
 	root.AddCommand(vizCmd())
 	root.AddCommand(dashCmd())
 	root.AddCommand(setupCmd())
-	root.AddCommand(mcpCmd())
+	root.AddCommand(mcpCmd(factory))
 	root.AddCommand(contextCmd())
 	root.AddCommand(refreshCmd())
 	return root
@@ -272,16 +271,5 @@ func doctorCmd() *cobra.Command {
 		defer db.Close()
 		fmt.Fprintln(cmd.OutOrStdout(), "trace-brain doctor: ok")
 		return nil
-	}}
-}
-
-func mcpCmd() *cobra.Command {
-	return &cobra.Command{Use: "mcp", Short: "Serve memory tools over MCP stdio", RunE: func(cmd *cobra.Command, args []string) error {
-		db, err := openDB()
-		if err != nil {
-			return err
-		}
-		defer db.Close()
-		return mcp.New(db).Run(cmd.Context())
 	}}
 }
