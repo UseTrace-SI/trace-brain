@@ -14,13 +14,14 @@ import (
 func Open(path string) (*sql.DB, error) {
 	// Imports read fingerprints before writing. Reserve the writer at BEGIN
 	// so another process cannot invalidate that read snapshot before the write.
-	dsn := path + "?_txlock=immediate"
+	options := url.Values{"_txlock": {"immediate"}, "_pragma": {"busy_timeout(30000)", "foreign_keys(1)", "journal_mode(WAL)"}}
+	dsn := path + "?" + options.Encode()
 	if path != ":memory:" {
 		absolute, err := filepath.Abs(path)
 		if err != nil {
 			return nil, err
 		}
-		u := url.URL{Scheme: "file", Path: absolute, RawQuery: "_txlock=immediate"}
+		u := url.URL{Scheme: "file", Path: absolute, RawQuery: options.Encode()}
 		dsn = u.String()
 	}
 	db, err := sql.Open("sqlite", dsn)
@@ -74,6 +75,32 @@ CREATE INDEX IF NOT EXISTS memories_scope ON memories(scope, created_at DESC);
 CREATE INDEX IF NOT EXISTS memory_imports_memory ON memory_imports(memory_id,source_db);
 CREATE TABLE IF NOT EXISTS embeddings (memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
   dim INTEGER NOT NULL, vector BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS memory_revisions (
+  memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL, scope TEXT NOT NULL, content TEXT NOT NULL,
+  recorded_at INTEGER NOT NULL, PRIMARY KEY(memory_id,revision));
+CREATE TABLE IF NOT EXISTS semantic_embeddings (
+ memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+ endpoint TEXT NOT NULL, model TEXT NOT NULL, digest TEXT NOT NULL,
+ content_hash TEXT NOT NULL, dim INTEGER NOT NULL, vector BLOB NOT NULL,
+ PRIMARY KEY(memory_id,endpoint,model,digest));
+CREATE TABLE IF NOT EXISTS document_sources (
+ root TEXT NOT NULL,path TEXT NOT NULL,fingerprint TEXT NOT NULL,scope TEXT NOT NULL,
+ chunk_count INTEGER NOT NULL,imported_at INTEGER NOT NULL,PRIMARY KEY(root,path));
+CREATE TABLE IF NOT EXISTS document_chunks (
+ root TEXT NOT NULL,path TEXT NOT NULL,ordinal INTEGER NOT NULL,
+ memory_id TEXT NOT NULL UNIQUE REFERENCES memories(id) ON DELETE CASCADE,
+ PRIMARY KEY(root,path,ordinal),FOREIGN KEY(root,path) REFERENCES document_sources(root,path) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS facts (
+ id TEXT PRIMARY KEY,scope TEXT NOT NULL,subject TEXT NOT NULL,predicate TEXT NOT NULL,object TEXT NOT NULL,
+ valid_from INTEGER NOT NULL,valid_to INTEGER,recorded_at INTEGER NOT NULL,retracted_at INTEGER,
+ evidence_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,evidence_hash TEXT NOT NULL,
+ is_exclusive INTEGER NOT NULL CHECK(is_exclusive IN (0,1)),CHECK(valid_to IS NULL OR valid_to>valid_from));
+CREATE INDEX IF NOT EXISTS facts_subject ON facts(scope,subject,predicate,valid_from,recorded_at);
+CREATE INDEX IF NOT EXISTS facts_object ON facts(scope,object,valid_from,recorded_at);
+CREATE TRIGGER IF NOT EXISTS facts_budget BEFORE INSERT ON facts WHEN (SELECT count(*) FROM facts)>=10000 BEGIN
+ SELECT RAISE(ABORT,'fact_budget_exceeded');
+END;
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("migrating: %w", err)

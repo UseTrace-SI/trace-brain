@@ -2,6 +2,8 @@
 
 Continuous memory layer over Trace history.
 
+Licensed under [Apache-2.0](LICENSE).
+
 The coordinated Trace bundle supplies this executable beside the other two
 local components, with one release version. With an approved personal connection,
 CLI publishes bounded derived context to the hosted dashboard. Raw companion
@@ -12,6 +14,15 @@ describe the checkout when indexed, with their index timestamp.
 - `trace-brain version`
 - `trace-brain status`
 - `trace-brain remember <content> [--scope]`
+- `trace-brain get <id>`
+- `trace-brain update <id> <content> [--scope]`
+- `trace-brain history <id>`
+- `trace-brain forget <id>`
+- `trace-brain verify <id>`
+- `trace-brain workspace query <words> --databases PATH [--databases PATH]`
+- `trace-brain embed --model EXACT_INSTALLED_MODEL [--endpoint LOCAL_ORIGIN]`
+- `trace-brain semantic <query> --model EXACT_INSTALLED_MODEL`
+- `trace-brain capabilities`
 - `trace-brain recall <query>`
 - `trace-brain query <query>`
 - `trace-brain overview`
@@ -45,7 +56,7 @@ Run `go test -race ./...` and `go test -race -run TestRegression -count=100 ./in
 
 ## Production bounds
 
-Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline and keep at most 50 ranked candidates in memory. Local embeddings are hashed word projections rather than a learned semantic model.
+Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline and keep at most 50 ranked candidates in memory. The existing context `--semantic` flag uses hashed word projections; it does not invoke a learned model. The separate explicit `embed` and `semantic` commands support learned vectors through a local Ollama service.
 
 MCP recall/query return at most 50 memories with 2,048 characters of content each. New manual/MCP memories are limited to 64 KiB and save their embedding atomically. Extraction caps stdout at 64 KiB and stderr at 4 KiB, cancels noisy subprocesses, and holds no memory-database transaction while waiting on an external agent. Successful extracted memories commit independently; an error leaves previous successful extractions intact for idempotent retry.
 
@@ -65,3 +76,83 @@ The optional hashed-word ranker omits zero-overlap results; it remains a lexical
 fallback. Quality regressions cover relevant older evidence outranking recent
 weak matches, changed extraction inputs, output redaction and deleted-source
 cleanup. Source/session/turn provenance remains present in context responses.
+
+## Memory lifecycle and workspace retrieval
+
+Manual and MCP memories can be revised with `update`; the content, keyword index,
+local vector and redacted revision commit together. Derived memories remain
+source-owned. `history` returns at most 50 revisions. `forget` removes the memory,
+its revision records, vectors, FTS entry and import links. It does not modify the
+source Trace history or backups; a later refresh can reimport a derived memory.
+`verify` checks whether linked source sessions/turns still exist and explicitly
+does not certify the memory's conclusions. Read commands never create an index.
+
+`workspace query` searches 1–16 explicitly selected local databases with an
+optional exact `--scope` filter and a combined 1–50 result limit. It reports
+unavailable sources as partial results, ranks by source rank and recency rather
+than comparing unrelated BM25 magnitudes, and never copies or uploads memories.
+
+## Explicit learned embeddings
+
+Provide the exact name of a model already installed in Ollama. Trace never pulls
+models automatically. `embed` processes at most 1,000 memories per invocation;
+`--offset` continues a capped selection and `--force` recomputes existing vectors.
+The model endpoint must be a loopback HTTP(S) origin. Redirects, remote endpoints,
+credentials in URLs, oversized responses and silent model input truncation are
+refused. Each inference batch is bounded to 16 texts and holds no SQLite transaction.
+
+Cached vectors are tied to the endpoint, model name, observed model digest and
+memory-content hash. Detected digest changes during inference abort that batch;
+changed/deleted memories cannot receive an obsolete vector. Semantic queries
+report missing/stale vectors and omit them from ranking. Updating or forgetting
+a memory invalidates/removes its learned vectors. Ordinary context/MCP reads do
+not contact a model. Protocol, cache and ranking paths have offline tests; live
+Ollama acceptance and retrieval-quality benchmarks remain outstanding.
+
+## Local document sources
+
+`documents sync --root /absolute/docs --scope docs --dry-run` previews an explicit
+source. Omit `--dry-run` to import `.md`, `.markdown`, `.txt` and `.rst` files.
+Sources are read-only, text is redacted before storage, and symlinks, protected
+directories and Git-ignored paths are excluded before file content is read.
+Files must contain valid UTF-8, without NUL, up to 128 KiB each. A scan is bounded
+to 512 candidate files, 16 MiB of text, 10,000 entries and 4,096 memory chunks.
+Oversized or failed scans leave the index unchanged.
+
+Refresh tracks source fingerprints and repairs changed or forgotten derived
+chunks atomically with their lexical/hashed-word indexes. Changed source chunks
+lose obsolete learned vectors. `documents list --root /absolute/docs` reports the
+stored fingerprints and import times; it does not claim that an unrefreshed source
+is current. Missing/excluded documents remain reported until `sync --prune`
+explicitly removes their local records. `documents forget-source --root PATH`
+removes an entire derived source, including one whose directory no longer exists.
+Source files and backups are never changed. A later sync can reimport a source.
+
+Documents are local-only and are excluded from automatic hosted context snapshots.
+Use local recall, explicit workspace retrieval or learned search to query them.
+Remote connectors, PDF/Office formats and document sharing remain unimplemented.
+
+## Temporal claims
+
+`facts assert SUBJECT PREDICATE OBJECT --evidence MEMORY_ID --from RFC3339`
+records a claim linked to the current redacted content of a local memory. `--until`
+sets an exclusive validity end. Without `--from`, validity starts now. Scopes are
+exact and default to `project`. Text fields are redacted; claims are never treated
+as certified truth. `--exclusive` rejects overlapping different values for the
+same scoped subject and predicate, including a new nonexclusive value that would
+violate an existing exclusive claim. Resolve a conflict by reviewing and explicitly
+retracting the previous claim; no conclusion is silently replaced.
+
+`facts query --at RFC3339 --known-at RFC3339` separates the time a claim applies
+from when it was recorded or retracted. `facts retract ID` preserves prior
+recorded-time queries. Queries check evidence against its **current** memory hash;
+they do not reconstruct historical source content. Changed evidence is marked
+stale and excluded unless `--include-stale` is selected. Forgetting a source memory
+also removes its linked facts. Assertions stay local and are not uploaded.
+
+`facts graph ENTITY --depth 3 --direction both` traverses scoped relationships,
+handles cycles and returns at most 100 assertions. Reads have a two-second deadline,
+candidate/content budgets and explicit truncation. The read-only `brain_facts` MCP
+tool accepts validity/recorded times as Unix milliseconds. Natural-language entity
+extraction, automatic contradiction resolution and comparative graph-quality
+benchmarks are still pending.

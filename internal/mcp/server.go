@@ -24,6 +24,12 @@ func NewServer(db *sql.DB) *mcp.Server {
 	mcp.AddTool(server, &mcp.Tool{Name: "brain_query", Description: "Query memories"}, s.query)
 	mcp.AddTool(server, &mcp.Tool{Name: "brain_brief", Description: "Brief for a task"}, s.brief)
 	mcp.AddTool(server, &mcp.Tool{Name: "brain_overview", Description: "Project overview"}, s.overview)
+	mcp.AddTool(server, &mcp.Tool{Name: "brain_get", Description: "Read a memory with source provenance", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, s.get)
+	mcp.AddTool(server, &mcp.Tool{Name: "brain_update", Description: "Revise a manual/MCP memory and preserve local version history"}, s.update)
+	destructive := true
+	mcp.AddTool(server, &mcp.Tool{Name: "brain_forget", Description: "Delete a memory and all local revisions, embeddings and import links; source history is unchanged", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive}}, s.forget)
+	mcp.AddTool(server, &mcp.Tool{Name: "brain_history", Description: "Read up to 50 local versions of a memory", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, s.history)
+	mcp.AddTool(server, &mcp.Tool{Name: "brain_facts", Description: "Read evidence-linked temporal claims; at/known_at are Unix milliseconds. Claims are not truth certifications; stale current evidence is excluded by default.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, s.facts)
 	return server
 }
 

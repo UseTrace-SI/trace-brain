@@ -2,6 +2,7 @@ package cli
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,10 @@ import (
 var dbPath string
 
 func newRoot() *cobra.Command {
+	return newRootWithModelProvider(localModelProvider)
+}
+
+func newRootWithModelProvider(factory modelFactory) *cobra.Command {
 	root := &cobra.Command{Use: "trace-brain", Short: "Continuous memory over Trace history"}
 	root.PersistentFlags().StringVar(&dbPath, "db", ".trace-brain/memory.db", "memory database path")
 	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
@@ -29,8 +34,21 @@ func newRoot() *cobra.Command {
 		return nil
 	}
 	root.AddCommand(versionCmd())
+	root.AddCommand(&cobra.Command{Use: "capabilities", Short: "Report retrieval modes and network policy without probing services", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "retrieval": map[string]any{"default": "sqlite_bm25", "legacy_semantic_flag": "hashed_words", "learned": "explicit_local_ollama", "model_service": "not_probed"}, "context_network": false, "memory_lifecycle": []string{"get", "update", "history", "forget", "verify_references"}, "workspace_retrieval": "explicit_read_only_databases", "documents": map[string]any{"sources": "explicit_local_text", "remote_connectors": false, "hosted_publication": false}, "facts": map[string]any{"input": "explicit_evidence_linked_claims", "temporal": "validity_and_recorded_time", "evidence": "current_memory_hash", "automatic_extraction": false, "source_verified": false}})
+	}})
 	root.AddCommand(statusCmd())
 	root.AddCommand(rememberCmd())
+	root.AddCommand(getCmd())
+	root.AddCommand(updateCmd())
+	root.AddCommand(forgetCmd())
+	root.AddCommand(historyCmd())
+	root.AddCommand(verifyCmd())
+	root.AddCommand(workspaceCmd())
+	root.AddCommand(documentsCmd())
+	root.AddCommand(factsCmd())
+	root.AddCommand(embedCmd(factory))
+	root.AddCommand(semanticCmd(factory))
 	root.AddCommand(recallCmd())
 	root.AddCommand(queryCmd())
 	root.AddCommand(overviewCmd())

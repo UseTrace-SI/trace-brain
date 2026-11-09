@@ -42,3 +42,27 @@ func TestMemoryBoundsAndLiteralQueries(t *testing.T) {
 		t.Fatal("cancelled query succeeded")
 	}
 }
+
+func TestMemoryHistoryContentIsBoundedAndMarked(t *testing.T) {
+	db, err := store.Open(t.TempDir() + "/m.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := store.Remember(ctx, db, "m", "project", strings.Repeat("中", 3000), "mcp", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(ctx, db, "m", "", strings.Repeat("文", 3000), 2); err != nil {
+		t.Fatal(err)
+	}
+	_, history, err := New(db).history(ctx, nil, memoryID{ID: "m"})
+	if err != nil || len(history.Revisions) != 2 {
+		t.Fatalf("history: %+v %v", history, err)
+	}
+	for _, version := range history.Revisions {
+		if len([]rune(version.Content)) != 2048 || !version.ContentTruncated {
+			t.Fatalf("unbounded history version: %d", len([]rune(version.Content)))
+		}
+	}
+}
