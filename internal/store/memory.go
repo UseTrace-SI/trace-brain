@@ -34,6 +34,7 @@ func Remember(ctx context.Context, db *sql.DB, id, scope, content, source string
 		return fmt.Errorf("memory must contain 1–65536 bytes and scope at most 1024 bytes")
 	}
 	content = (redact.Redactor{}).Text(content)
+	scope = (redact.Redactor{}).Text(scope)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -43,6 +44,9 @@ func Remember(ctx context.Context, db *sql.DB, id, scope, content, source string
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO embeddings(memory_id,dim,vector) VALUES(?,?,?)", id, embed.Dim, embed.Encode(embed.Embed(content))); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO memory_revisions(memory_id,revision,scope,content,recorded_at) VALUES(?,1,?,?,?)", id, scope, content, at); err != nil {
 		return err
 	}
 	return tx.Commit()
