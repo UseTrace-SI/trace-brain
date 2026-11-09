@@ -136,12 +136,32 @@ context aggregation and live installed-model quality/latency acceptance remain o
 ## Local document sources
 
 `documents sync --root /absolute/docs --scope docs --dry-run` previews an explicit
-source. Omit `--dry-run` to import `.md`, `.markdown`, `.txt` and `.rst` files.
+source. Omit `--dry-run` to import `.md`, `.markdown`, `.txt`, `.rst` and `.docx` files.
 Sources are read-only, text is redacted before storage, and symlinks, protected
 directories and Git-ignored paths are excluded before file content is read.
-Files must contain valid UTF-8, without NUL, up to 128 KiB each. A scan is bounded
-to 512 candidate files, 16 MiB of text, 10,000 entries and 4,096 memory chunks.
+Plain-text files must contain valid UTF-8, without NUL, up to 128 KiB each. A scan is bounded
+to 512 candidate files, 16 MiB each of input and extracted text, 10,000 entries and 4,096 memory chunks.
 Oversized or failed scans leave the index unchanged.
+
+DOCX ingestion follows the package's main-document relationship and verifies its
+non-macro Word content type. It extracts UTF-8 WordprocessingML main-body paragraphs
+and table text, including inserted revisions. Paragraph boundaries, tabs and line
+breaks are retained. The implementation follows the [WordprocessingML structure](https://learn.microsoft.com/en-us/office/open-xml/word/how-to-open-and-add-text-to-a-word-processing-document)
+and [package relationship identity](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/opc/parts-overview).
+Comments, headers, footers, footnotes/endnotes, drawings, deleted/moved-from revisions
+and field instructions/results are omitted. Layout, numbering and style resolution
+are not rendered. Images, macros, embedded objects, external content and formulas
+are not executed or fetched. Only the selected parts are decompressed in memory;
+no archive member is written to disk.
+
+DOCX limits are 2 MiB of ZIP input, 256 entries, 32 MiB of declared expanded data,
+64 KiB per package metadata part, 4 MiB for main XML, 200,000 XML tokens, depth 128
+and 128 KiB of extracted text. Encrypted packages, ambiguous identities, unsafe
+part names, unsupported main types, malformed selected XML and selected-part CRC
+failures stop the whole scan before database mutation. Fingerprints bind the raw
+package to the extractor version. Extracted text is redacted and stays local under
+the same refresh/prune/forget policy as ordinary document sources. PDF, other
+Office formats and remote connectors remain unimplemented.
 
 Refresh tracks source fingerprints and repairs changed or forgotten derived
 chunks atomically with their lexical/hashed-word indexes. Changed source chunks

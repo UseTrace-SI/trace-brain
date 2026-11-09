@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/UseTrace-SI/trace-brain/internal/documents"
 	"github.com/UseTrace-SI/trace-brain/internal/redact"
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/spf13/cobra"
@@ -222,8 +223,12 @@ func collectDocuments(ctx context.Context, path string) ([]store.DocumentInput, 
 			return nil
 		}
 		switch strings.ToLower(filepath.Ext(path)) {
-		case ".md", ".markdown", ".txt", ".rst":
+		case ".md", ".markdown", ".txt", ".rst", ".docx":
 		default:
+			return nil
+		}
+		if strings.EqualFold(filepath.Ext(path), ".docx") && strings.HasPrefix(filepath.Base(path), "~$") {
+			excluded++
 			return nil
 		}
 		if !entry.Type().IsRegular() {
@@ -245,8 +250,8 @@ func collectDocuments(ctx context.Context, path string) ([]store.DocumentInput, 
 	if err != nil {
 		return nil, excluded, err
 	}
-	documents := []store.DocumentInput{}
-	total := 0
+	collected := []store.DocumentInput{}
+	totalInput, totalText := 0, 0
 	for _, path := range paths {
 		if ignored[path] {
 			excluded++
@@ -260,7 +265,12 @@ func collectDocuments(ctx context.Context, path string) ([]store.DocumentInput, 
 			return nil, excluded, err
 		}
 		before, statErr := file.Stat()
-		data, readErr := io.ReadAll(io.LimitReader(file, 128*1024+1))
+		limit := 128 * 1024
+		isDOCX := strings.EqualFold(filepath.Ext(path), ".docx")
+		if isDOCX {
+			limit = documents.MaxDOCXBytes
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, int64(limit)+1))
 		after, lastErr := file.Stat()
 		file.Close()
 		if statErr != nil || readErr != nil || lastErr != nil {
@@ -269,23 +279,36 @@ func collectDocuments(ctx context.Context, path string) ([]store.DocumentInput, 
 		if !before.ModTime().Equal(after.ModTime()) || before.Size() != after.Size() {
 			return nil, excluded, fmt.Errorf("document changed during reading; retry sync")
 		}
-		if len(data) > 128*1024 || !utf8.Valid(data) || bytes.ContainsRune(data, 0) {
+		if len(data) > limit {
+			return nil, excluded, fmt.Errorf("document exceeds its input byte budget")
+		}
+		content := string(data)
+		fingerprint := sha256.New()
+		if isDOCX {
+			content, err = documents.DOCX(ctx, data)
+			if err != nil {
+				return nil, excluded, err
+			}
+			fingerprint.Write([]byte(documents.DOCXVersion + "\x00"))
+		} else if !utf8.Valid(data) || bytes.ContainsRune(data, 0) {
 			return nil, excluded, fmt.Errorf("documents must be UTF-8 text up to 128 KiB each")
 		}
-		total += len(data)
-		if total > 16*1024*1024 {
-			return nil, excluded, fmt.Errorf("document source exceeds 16 MiB")
+		totalInput += len(data)
+		totalText += len(content)
+		if totalInput > 16*1024*1024 || totalText > 16*1024*1024 {
+			return nil, excluded, fmt.Errorf("document source exceeds 16 MiB of input or extracted text")
 		}
-		documents = append(documents, store.DocumentInput{Path: path, Fingerprint: fmt.Sprintf("%x", sha256.Sum256(data)), Content: (redact.Redactor{}).Text(string(data))})
+		fingerprint.Write(data)
+		collected = append(collected, store.DocumentInput{Path: path, Fingerprint: fmt.Sprintf("%x", fingerprint.Sum(nil)), Content: (redact.Redactor{}).Text(content)})
 	}
-	return documents, excluded, nil
+	return collected, excluded, nil
 }
 
 func documentsCmd() *cobra.Command {
-	parent := &cobra.Command{Use: "documents", Short: "Import explicit local text sources with freshness and deletion tracking"}
+	parent := &cobra.Command{Use: "documents", Short: "Import explicit local text and DOCX body sources with freshness and deletion tracking"}
 	var root, scope string
 	var prune, dryRun bool
-	sync := &cobra.Command{Use: "sync", Args: cobra.NoArgs, Short: "Refresh local Markdown/plain-text documents without modifying source files", RunE: func(cmd *cobra.Command, _ []string) error {
+	sync := &cobra.Command{Use: "sync", Args: cobra.NoArgs, Short: "Refresh local text and DOCX body documents without modifying source files", RunE: func(cmd *cobra.Command, _ []string) error {
 		canonical, err := documentRoot(root)
 		if err != nil {
 			return err
