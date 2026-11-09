@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 )
@@ -59,8 +60,44 @@ func TestFactsCLIQueriesAndTraversesScopedTemporalClaims(t *testing.T) {
 	if err := json.Unmarshal(run("facts", "query", "--subject", "A", "--predicate", "uses", "--at", "2024-02-01T00:00:00Z"), &graph); err != nil || len(graph.Result.Facts) != 1 {
 		t.Fatalf("query: %+v %v", graph, err)
 	}
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(ctx, db, "e", "", "edited evidence", time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if err := json.Unmarshal(run("facts", "query", "--subject", "A", "--predicate", "uses"), &graph); err != nil || len(graph.Result.Facts) != 0 {
+		t.Fatal("current evidence change ignored", err)
+	}
+	if err := json.Unmarshal(run("facts", "query", "--subject", "A", "--predicate", "uses", "--evidence-mode", "captured"), &graph); err != nil || len(graph.Result.Facts) != 1 || !graph.Result.Facts[0].EvidenceStale || graph.Result.EvidenceMode != "captured" {
+		t.Fatalf("captured mode: %+v %v", graph, err)
+	}
+	var capture struct {
+		Evidence store.FactEvidence `json:"evidence"`
+	}
+	if err := json.Unmarshal(run("facts", "evidence", asserted.Fact.ID), &capture); err != nil || capture.Evidence.Content != "deployment evidence" || capture.Evidence.SourceVerified {
+		t.Fatalf("evidence: %+v %v", capture, err)
+	}
+	if err := json.Unmarshal(run("facts", "graph", "A", "--depth", "3", "--direction", "both", "--evidence-mode", "captured"), &graph); err != nil || len(graph.Result.Facts) != 4 {
+		t.Fatalf("captured graph: %+v %v", graph, err)
+	}
 	run("facts", "retract", asserted.Fact.ID)
 	if err := json.Unmarshal(run("facts", "query", "--subject", "A", "--predicate", "uses"), &graph); err != nil || len(graph.Result.Facts) != 0 {
 		t.Fatalf("retract: %+v %v", graph, err)
+	}
+	run("facts", "forget", asserted.Fact.ID)
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := store.Get(ctx, db, "e"); err != nil {
+		t.Fatal("claim deletion removed its source", err)
+	}
+	var n int
+	if err := db.QueryRow("SELECT count(*) FROM fact_evidence WHERE fact_id=?", asserted.Fact.ID).Scan(&n); err != nil || n != 0 {
+		t.Fatal("claim deletion retained captured evidence", err)
 	}
 }

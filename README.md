@@ -135,7 +135,7 @@ Remote connectors, PDF/Office formats and document sharing remain unimplemented.
 ## Temporal claims
 
 `facts assert SUBJECT PREDICATE OBJECT --evidence MEMORY_ID --from RFC3339`
-records a claim linked to the current redacted content of a local memory. `--until`
+records a claim and an immutable copy of the current redacted local evidence. `--until`
 sets an exclusive validity end. Without `--from`, validity starts now. Scopes are
 exact and default to `project`. Text fields are redacted; claims are never treated
 as certified truth. `--exclusive` rejects overlapping different values for the
@@ -145,14 +145,33 @@ retracting the previous claim; no conclusion is silently replaced.
 
 `facts query --at RFC3339 --known-at RFC3339` separates the time a claim applies
 from when it was recorded or retracted. `facts retract ID` preserves prior
-recorded-time queries. Queries check evidence against its **current** memory hash;
-they do not reconstruct historical source content. Changed evidence is marked
-stale and excluded unless `--include-stale` is selected. Forgetting a source memory
-also removes its linked facts. Assertions stay local and are not uploaded.
+recorded-time queries. Queries default to the **current** memory hash; changed
+evidence is marked stale and excluded unless `--include-stale` is selected.
+
+`facts query --evidence-mode captured` and the same flag on `facts graph` instead
+require the original captured bytes to match the assertion hash. The current
+staleness flag remains visible. `facts evidence ID [--known-at RFC3339]` reads the
+original redacted copy, including after source edits or claim retraction, within
+the exact `--scope`. Neither mode certifies the claim or its source as true.
+Legacy assertions without a capture are never backfilled from today's content;
+captured mode reports them as unavailable. This retains assertion evidence, not
+an arbitrary historical file or external document revision.
+
+Each capture is at most 64 KiB. Content bytes plus a 1 KiB reservation per capture
+share a 32 MiB local application budget; this is not the physical SQLite file
+size. Acceptance and reservation are atomic. At capacity, remove an unused claim
+with `facts forget ID`; this deletes its captured copy and keeps the source memory.
+Retraction preserves evidence and its reservation. Forgetting a source memory,
+or removing its derived record during refresh, deletes its facts and captures
+and releases their reservations. Assertions and captures stay local and are not
+uploaded.
 
 `facts graph ENTITY --depth 3 --direction both` traverses scoped relationships,
 handles cycles and returns at most 100 assertions. Reads have a two-second deadline,
 candidate/content budgets and explicit truncation. The read-only `brain_facts` MCP
-tool accepts validity/recorded times as Unix milliseconds. Natural-language entity
+tool accepts validity/recorded times as Unix milliseconds and an `evidence_mode`.
+The read-only `brain_fact_evidence` tool caps content at 16 KiB, preserving valid
+UTF-8 and reporting the full capture's byte count, hash and truncation. Evidence
+content remains untrusted quoted data. Natural-language entity
 extraction, automatic contradiction resolution and comparative graph-quality
 benchmarks are still pending.

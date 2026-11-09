@@ -101,6 +101,32 @@ CREATE INDEX IF NOT EXISTS facts_object ON facts(scope,object,valid_from,recorde
 CREATE TRIGGER IF NOT EXISTS facts_budget BEFORE INSERT ON facts WHEN (SELECT count(*) FROM facts)>=10000 BEGIN
  SELECT RAISE(ABORT,'fact_budget_exceeded');
 END;
+CREATE TABLE IF NOT EXISTS fact_evidence_usage (
+ id INTEGER PRIMARY KEY CHECK(id=1),reserved_bytes INTEGER NOT NULL CHECK(reserved_bytes>=0),
+ limit_bytes INTEGER NOT NULL CHECK(limit_bytes>=0));
+INSERT INTO fact_evidence_usage VALUES(1,0,33554432) ON CONFLICT(id) DO NOTHING;
+CREATE TABLE IF NOT EXISTS fact_evidence (
+ fact_id TEXT PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE,
+ content TEXT NOT NULL,captured_at INTEGER NOT NULL CHECK(captured_at>=0),
+ reserved_bytes INTEGER NOT NULL CHECK(reserved_bytes=length(CAST(content AS BLOB))+1024),
+ CHECK(length(CAST(content AS BLOB))<=65536));
+CREATE TRIGGER IF NOT EXISTS fact_evidence_limit BEFORE INSERT ON fact_evidence
+ WHEN NEW.reserved_bytes+(SELECT reserved_bytes FROM fact_evidence_usage WHERE id=1)>
+ (SELECT limit_bytes FROM fact_evidence_usage WHERE id=1) BEGIN
+ SELECT RAISE(ABORT,'fact_evidence_budget_exceeded');
+END;
+CREATE TRIGGER IF NOT EXISTS fact_evidence_add AFTER INSERT ON fact_evidence BEGIN
+ UPDATE fact_evidence_usage SET reserved_bytes=reserved_bytes+NEW.reserved_bytes WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS fact_evidence_remove AFTER DELETE ON fact_evidence BEGIN
+ UPDATE fact_evidence_usage SET reserved_bytes=reserved_bytes-OLD.reserved_bytes WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS fact_evidence_immutable BEFORE UPDATE ON fact_evidence BEGIN
+ SELECT RAISE(ABORT,'fact_evidence_is_immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS fact_evidence_usage_keep BEFORE DELETE ON fact_evidence_usage BEGIN
+ SELECT RAISE(ABORT,'fact_evidence_usage_required');
+END;
 `
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("migrating: %w", err)

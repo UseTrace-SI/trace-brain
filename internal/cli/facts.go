@@ -16,6 +16,7 @@ type factTimes struct {
 	At, KnownAt  string
 	Limit        int
 	IncludeStale bool
+	EvidenceMode string
 }
 
 func factTimestamp(value string, fallback int64) (int64, error) {
@@ -41,13 +42,18 @@ func factOptions(flags factTimes, scope string) (store.FactQuery, error) {
 	if err != nil {
 		return store.FactQuery{}, err
 	}
-	return store.FactQuery{Scope: scope, At: at, KnownAt: known, Limit: flags.Limit, IncludeStale: flags.IncludeStale}, nil
+	mode, err := store.FactEvidenceMode(flags.EvidenceMode)
+	if err != nil {
+		return store.FactQuery{}, err
+	}
+	return store.FactQuery{Scope: scope, At: at, KnownAt: known, Limit: flags.Limit, IncludeStale: flags.IncludeStale, EvidenceMode: mode}, nil
 }
 func factQueryFlags(cmd *cobra.Command, flags *factTimes, limit int) {
 	cmd.Flags().StringVar(&flags.At, "at", "", "query effective validity at this RFC3339 time (default now)")
 	cmd.Flags().StringVar(&flags.KnownAt, "known-at", "", "query assertions known at this RFC3339 time (default now)")
 	cmd.Flags().IntVar(&flags.Limit, "limit", limit, "maximum returned assertions (1–100)")
 	cmd.Flags().BoolVar(&flags.IncludeStale, "include-stale", false, "include claims whose current evidence content has changed")
+	cmd.Flags().StringVar(&flags.EvidenceMode, "evidence-mode", "current", "check current memory content or the captured assertion evidence")
 }
 func factsCmd() *cobra.Command {
 	var scope string
@@ -55,7 +61,7 @@ func factsCmd() *cobra.Command {
 	parent.PersistentFlags().StringVar(&scope, "scope", "project", "exact local fact scope")
 	var evidence, from, until string
 	var exclusive bool
-	assert := &cobra.Command{Use: "assert SUBJECT PREDICATE OBJECT", Args: cobra.ExactArgs(3), Short: "Record a user-supplied claim linked to a local memory", RunE: func(cmd *cobra.Command, args []string) error {
+	assert := &cobra.Command{Use: "assert SUBJECT PREDICATE OBJECT", Args: cobra.ExactArgs(3), Short: "Record a claim with a bounded, redacted local evidence snapshot", RunE: func(cmd *cobra.Command, args []string) error {
 		now := time.Now().UnixMilli()
 		start, err := factTimestamp(from, now)
 		if err != nil {
@@ -126,7 +132,7 @@ func factsCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"result": result, "at": options.At, "known_at": options.KnownAt, "evidence_check": "current_memory_hash", "local_only": true})
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"result": result, "at": options.At, "known_at": options.KnownAt, "evidence_check": store.FactEvidenceCheck(options.EvidenceMode), "local_only": true})
 	}}
 	factQueryFlags(query, &queryTimes, 20)
 	query.Flags().StringVar(&subject, "subject", "", "exact subject filter")
@@ -154,17 +160,55 @@ func factsCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"result": result, "at": options.At, "known_at": options.KnownAt, "scope": scope, "evidence_check": "current_memory_hash", "local_only": true})
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"result": result, "at": options.At, "known_at": options.KnownAt, "scope": scope, "evidence_check": store.FactEvidenceCheck(options.EvidenceMode), "local_only": true})
 	}}
 	factQueryFlags(graph, &graphTimes, 100)
 	graph.Flags().IntVar(&depth, "depth", 3, "maximum traversal depth (1–8)")
 	graph.Flags().StringVar(&direction, "direction", "out", "relationship direction: out or both")
-	parent.AddCommand(assert, retract, query, graph)
+	var evidenceKnownAt string
+	inspect := &cobra.Command{Use: "evidence ID", Args: cobra.ExactArgs(1), Short: "Read the original redacted evidence captured for this claim", RunE: func(cmd *cobra.Command, args []string) error {
+		known, err := factTimestamp(evidenceKnownAt, time.Now().UnixMilli())
+		if err != nil {
+			return err
+		}
+		db, err := readMemoryDB()
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+		defer cancel()
+		evidence, err := store.GetFactEvidence(ctx, db, args[0], scope, known)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"evidence": evidence, "known_at": known, "local_only": true})
+	}}
+	inspect.Flags().StringVar(&evidenceKnownAt, "known-at", "", "read captured evidence available at this recorded time (RFC3339)")
+	forget := &cobra.Command{Use: "forget ID", Args: cobra.ExactArgs(1), Short: "Delete this local claim and captured evidence; keep its source memory", RunE: func(cmd *cobra.Command, args []string) error {
+		db, err := openDB()
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+		defer cancel()
+		if err := store.ForgetFact(ctx, db, args[0], scope); err != nil {
+			return err
+		}
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"forgotten": args[0], "local_only": true})
+	}}
+	parent.AddCommand(assert, retract, query, graph, inspect, forget)
 	return parent
 }
 
 func traverseFacts(ctx context.Context, db *sql.DB, entity string, options store.FactQuery, depth int, direction string) (store.FactResults, error) {
 	result := store.FactResults{Facts: []store.Fact{}}
+	mode, err := store.FactEvidenceMode(options.EvidenceMode)
+	if err != nil {
+		return result, err
+	}
+	result.EvidenceMode = mode
 	if options.Limit < 1 || options.Limit > 100 {
 		return result, fmt.Errorf("fact graph limit must be 1–100")
 	}
@@ -198,6 +242,7 @@ func traverseFacts(ctx context.Context, db *sql.DB, entity string, options store
 		}
 		result.Truncated = result.Truncated || found.Truncated
 		result.StaleOmitted += found.StaleOmitted
+		result.EvidenceUnavailableOmitted += found.EvidenceUnavailableOmitted
 		for _, fact := range found.Facts {
 			if edges[fact.ID] {
 				continue
