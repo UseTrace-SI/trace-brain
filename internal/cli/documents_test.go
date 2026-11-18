@@ -11,6 +11,14 @@ import (
 	"testing"
 )
 
+func TestIgnoredDocumentsWithoutGitReturnsEmptyPolicy(t *testing.T) {
+	t.Setenv("PATH", "")
+	got, err := ignoredDocuments(context.Background(), t.TempDir(), []string{"guide.md"})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("missing Git should yield an empty ignore map: %+v %v", got, err)
+	}
+}
+
 func TestDocumentCollectionExcludesSecretsIgnoredFilesAndLinksBeforeReading(t *testing.T) {
 	root := t.TempDir()
 	if out, err := exec.Command("git", "init", "-q", root).CombinedOutput(); err != nil {

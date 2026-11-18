@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -110,7 +111,10 @@ func rememberCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		id := fmt.Sprintf("mem-%d", time.Now().UnixNano())
+		id, err := store.NewMemoryID(cmd.Context(), db)
+		if err != nil {
+			return err
+		}
 		if scope == "" {
 			scope = "project"
 		}
@@ -244,10 +248,17 @@ func vizCmd() *cobra.Command {
 		}
 		defer db.Close()
 		path := filepath.Join(filepath.Dir(dbPath), "viz.html")
-		if err := renderVisualization(db, path); err != nil {
+		ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+		defer cancel()
+		truncated, err := renderVisualization(ctx, db, path)
+		if err != nil {
 			return err
 		}
-		_, err = fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", path)
+		if truncated {
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "wrote %s (truncated to %d most recent memories)\n", path, vizLimit)
+		} else {
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", path)
+		}
 		return err
 	}}
 }

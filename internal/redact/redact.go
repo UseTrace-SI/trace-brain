@@ -14,8 +14,12 @@ var patterns = []struct {
 	kind string
 	rx   *regexp.Regexp
 }{
-	{"private-key", regexp.MustCompile(`(?s)-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----`)},
+	{"private-key", regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----`)},
 	{"aws-key", regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`)},
+	{"aws-secret", regexp.MustCompile(`(?i)\b(?:aws[ _-]*)?secret[ _-]*(?:access[ _-]*)?key[^\S\n]*[:=][^\S\n]*["']?[A-Za-z0-9/+=]{40}`)},
+	{"google-api-key", regexp.MustCompile(`\bAIza[A-Za-z0-9_-]{35}\b`)},
+	{"huggingface-token", regexp.MustCompile(`\bhf_[A-Za-z0-9]{20,}\b`)},
+	{"npm-token", regexp.MustCompile(`\bnpm_[A-Za-z0-9]{20,}\b`)},
 	{"github-token", regexp.MustCompile(`\b(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{20,}\b`)},
 	{"slack-token", regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`)},
 	{"stripe-key", regexp.MustCompile(`\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b`)},
@@ -27,14 +31,18 @@ var patterns = []struct {
 // Necessary literal fragments cheaply rule out patterns before invoking the
 // regexp engine on large transcripts. A fragment alone never causes redaction.
 var patternHints = map[string][]string{
-	"private-key":  {"PRIVATE KEY-----"},
-	"aws-key":      {"AKIA", "ASIA"},
-	"github-token": {"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"},
-	"slack-token":  {"xox"},
-	"stripe-key":   {"sk_", "rk_"},
-	"jwt":          {"eyJ"},
-	"api-key":      {"sk-"},
-	"url-password": {"://"},
+	"private-key":       {"PRIVATE KEY-----"},
+	"aws-key":           {"AKIA", "ASIA"},
+	"aws-secret":        {"SECRET", "secret"},
+	"google-api-key":    {"AIza"},
+	"huggingface-token": {"hf_"},
+	"npm-token":         {"npm_"},
+	"github-token":      {"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"},
+	"slack-token":       {"xox"},
+	"stripe-key":        {"sk_", "rk_"},
+	"jwt":               {"eyJ"},
+	"api-key":           {"sk-"},
+	"url-password":      {"://"},
 }
 
 var envValue = regexp.MustCompile(`(?im)\b[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_]*\s*[:=]\s*(["']?[^\s,"']+["']?)`)
@@ -71,10 +79,7 @@ func (r Redactor) Text(s string) string {
 		s = redactEnvValues(s)
 	}
 	original := s
-	var indexes [][]int
-	if context {
-		indexes = candidate.FindAllStringIndex(original, -1)
-	}
+	indexes := candidate.FindAllStringIndex(original, -1)
 	for i := len(indexes) - 1; i >= 0; i-- {
 		start, end := indexes[i][0], indexes[i][1]
 		from := start - 30
@@ -82,7 +87,12 @@ func (r Redactor) Text(s string) string {
 			from = 0
 		}
 		value := original[start:end]
-		if strings.Contains(original[from:start], "⟨redacted:") || !keyContext.MatchString(original[from:start]) || entropy(value) <= 4.0 {
+		highEntropy := entropy(value) > 4.0
+		// A bare 40-character AWS secret key (mixed upper/lower/digits) is
+		// recognized even without a nearby key label. Pure hex digests and
+		// UUIDs lack the mixed classes and remain untouched.
+		secretKey := looksLikeAWSKey(value)
+		if strings.Contains(original[from:start], "⟨redacted:") || !highEntropy || (!keyContext.MatchString(original[from:start]) && !secretKey) {
 			continue
 		}
 		s = s[:start] + marker("entropy", value) + s[end:]
@@ -142,6 +152,30 @@ func redactEnvValues(s string) string {
 	}
 	out.WriteString(s[last:])
 	return out.String()
+}
+
+// looksLikeAWSKey reports whether s has the shape of a 40-character AWS
+// secret access key: mixed character classes and a base64-like alphabet.
+func looksLikeAWSKey(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	var upper, lower, digit bool
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			upper = true
+		case c >= 'a' && c <= 'z':
+			lower = true
+		case c >= '0' && c <= '9':
+			digit = true
+		case c == '/' || c == '+' || c == '=' || c == '_' || c == '-':
+		default:
+			return false
+		}
+	}
+	return upper && lower && digit
 }
 
 func entropy(s string) float64 {

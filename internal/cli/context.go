@@ -169,7 +169,8 @@ func contextCmd(factory modelFactory) *cobra.Command {
 					continue
 				}
 				position := sort.Search(len(candidates), func(i int) bool {
-					return candidates[i].score < score || (candidates[i].score == score && candidates[i].item.CreatedAt < item.CreatedAt)
+					previous := candidates[i]
+					return previous.score < score || (previous.score == score && (previous.item.CreatedAt < item.CreatedAt || (previous.item.CreatedAt == item.CreatedAt && previous.item.ID > item.ID)))
 				})
 				if position < limit {
 					candidates = append(candidates, scored{})
@@ -184,7 +185,7 @@ func contextCmd(factory modelFactory) *cobra.Command {
 			if err := rows.Err(); err != nil {
 				return err
 			}
-			// Sort by score desc, then created_at desc.
+			// Sorted by score desc, then created_at desc, then ID asc.
 			if limit > len(candidates) {
 				limit = len(candidates)
 			}

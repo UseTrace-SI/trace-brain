@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -11,6 +12,53 @@ import (
 
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 )
+
+// Equal hashed scores and equal recency must still resolve in a deterministic
+// ID order, matching semantic.Search's score/recency/ID tie-break.
+func TestContextSemanticTiesBreakDeterministicallyByID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, id := range []string{"seed-c", "seed-a", "seed-b"} {
+		if err := store.Remember(context.Background(), db, id, "project", "car car car", "manual", 42); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{"seed-a", "seed-b", "seed-c"}
+	for i := 0; i < 5; i++ {
+		var out bytes.Buffer
+		cmd := newRoot()
+		cmd.SetOut(&out)
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs([]string{"--db", path, "context", "--semantic", "--query", "car", "--limit", "3"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		var got memoryContext
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Memories) != len(want) {
+			t.Fatalf("expected %d memories, got %d: %+v", len(want), len(got.Memories), got)
+		}
+		for j, item := range got.Memories {
+			if item.ID != want[j] {
+				t.Fatalf("unstable tie order: got %v, want %v", idsOf(got.Memories), want)
+			}
+		}
+	}
+}
+
+func idsOf(items []memoryItem) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids
+}
 
 func TestCompanionRefreshAndReadOnlyContext(t *testing.T) {
 	dir := t.TempDir()

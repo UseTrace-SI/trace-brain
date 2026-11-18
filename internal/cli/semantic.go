@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -13,8 +12,6 @@ import (
 	"github.com/UseTrace-SI/trace-brain/internal/semantic"
 	"github.com/spf13/cobra"
 )
-
-func textFingerprint(text string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(text))) }
 
 type modelProvider = semantic.Provider
 type modelFactory = semantic.Factory
@@ -72,7 +69,7 @@ func embedCmd(factory modelFactory) *cobra.Command {
 				rows.Close()
 				return fmt.Errorf("memory exceeds the 64 KiB embedding input budget")
 			}
-			item.hash = textFingerprint(item.content)
+			item.hash = semantic.ContentHash(item.content)
 			if !force && item.hash == oldHash {
 				unchanged++
 				continue

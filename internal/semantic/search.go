@@ -87,6 +87,24 @@ func validDigest(digest string) bool {
 	_, err := hex.DecodeString(digest)
 	return err == nil && len(digest) == 64 && digest == strings.ToLower(digest)
 }
+
+// redactAlgorithmVersion identifies the redaction algorithm used when deriving
+// embedding fingerprints. Bump it whenever redaction output can change so that
+// vectors embedded under the old rules are detected as stale.
+const redactAlgorithmVersion = "redact-v1"
+
+// contentHash binds an embedding to the exact redacted text sent to the model
+// plus the redaction algorithm version. The version makes the fingerprint
+// change even when the stored memory bytes are identical but the redaction
+// algorithm differs between embed and search.
+func contentHash(content, version string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(version+"\x00"+(redact.Redactor{}).Text(content))))
+}
+
+// ContentHash returns the cache fingerprint for learned embedding inputs.
+func ContentHash(content string) string {
+	return contentHash(content, redactAlgorithmVersion)
+}
 func validVector(vector []float32) bool {
 	if len(vector) == 0 || len(vector) > 8192 {
 		return false
@@ -207,7 +225,7 @@ func Search(ctx context.Context, db *sql.DB, provider Provider, in SearchRequest
 			out.MissingVectors++
 			continue
 		}
-		if len(content) > 65536 || !utf8.ValidString(content) || hash != fmt.Sprintf("%x", sha256.Sum256([]byte(content))) || dim != len(vectors[0]) || len(encoded) != dim*4 {
+		if len(content) > 65536 || !utf8.ValidString(content) || hash != ContentHash(content) || dim != len(vectors[0]) || len(encoded) != dim*4 {
 			out.StaleVectors++
 			continue
 		}

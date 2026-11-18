@@ -153,7 +153,13 @@ func ignoredDocuments(ctx context.Context, root string, paths []string) (map[str
 	probe.Stderr = &diagnostics
 	probe.Stdout = io.Discard
 	if err := probe.Run(); err != nil {
+		var execErr *exec.Error
 		var exit *exec.ExitError
+		if errors.Is(err, exec.ErrNotFound) || errors.As(err, &execErr) {
+			// No Git binary (common outside a repository): no ignore policy to
+			// apply, so let all candidate documents through.
+			return ignored, nil
+		}
 		if errors.As(err, &exit) && exit.ExitCode() == 128 && strings.Contains(diagnostics.String(), "not a git repository") {
 			return ignored, nil
 		}
@@ -165,6 +171,10 @@ func ignoredDocuments(ctx context.Context, root string, paths []string) (map[str
 	command.Stdin = strings.NewReader(input)
 	command.Stderr = io.Discard
 	output, err := command.Output()
+	var execErr *exec.Error
+	if errors.Is(err, exec.ErrNotFound) || errors.As(err, &execErr) {
+		return ignored, nil
+	}
 	var exit *exec.ExitError
 	if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 1) {
 		return nil, fmt.Errorf("checking ignored documents failed")

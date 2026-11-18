@@ -5,14 +5,31 @@ import (
 	"testing"
 )
 
+// syntheticAWSSecret builds a 40-character mixed-class value with high
+// entropy without embedding a credential-shaped literal in the source tree.
+func syntheticAWSSecret() string {
+	const alphabet = "Ab3Cd5Ef7Gh9Jk1Lm2Np4Qr6"
+	value := make([]byte, 40)
+	for i := range value {
+		value[i] = alphabet[i%len(alphabet)]
+	}
+	return string(value)
+}
+
 func TestKnownSecrets(t *testing.T) {
 	for _, tc := range []struct{ name, input string }{
-		{"aws", "AKIAABCDEFGHIJKLMNOP"},
+		{"aws", "AK" + "IA" + strings.Repeat("Z", 16)},
 		{"github", "ghp_abcdefghijklmnopqrstuvwxyz012345"},
 		{"openai", "sk-abcdefghijklmnopqrstuvwxyz012345"},
 		{"env", "API_TOKEN=abcdefghijklmnopqrstuvwxyz012345"},
 		{"unicode folded context", "ſecret value 7dF2aQ9mR4xT8vL1pN6cY3zB5kH0sW2u"},
 		{"private key", "-----BEGIN PRIVATE KEY-----\nmaterial\n-----END PRIVATE KEY-----"},
+		{"dsa private key", "-----BEGIN DSA PRIVATE KEY-----\nmaterial\n-----END DSA PRIVATE KEY-----"},
+		{"encrypted private key", "-----BEGIN ENCRYPTED PRIVATE KEY-----\nmaterial\n-----END ENCRYPTED PRIVATE KEY-----"},
+		{"google api key", "AIzaABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"},
+		{"huggingface token", "hf_abcdefghijklmnopqrstuvwxyz0123456789"},
+		{"npm token", "npm_abcdefghijklmnopqrstuvwxyz0123456789"},
+		{"aws secret key", syntheticAWSSecret()},
 		{"slack", "xoxb-1234567890-abcdefghij"},
 		{"stripe", "sk_live_abcdefghijklmnop123456"},
 		{"jwt", "eyJabcdefghij.eyJabcdefghij.abcdefghijk"},
@@ -40,6 +57,12 @@ func TestNegativesAndPII(t *testing.T) {
 		if got := (Redactor{}).Text(value); got != value {
 			t.Errorf("false positive: %q -> %q", value, got)
 		}
+	}
+	// A 40-character lowercase hex digest is not an AWS secret key: the
+	// high-entropy fallback must require mixed character classes.
+	digest := strings.Repeat("0123456789abcdef", 2) + "01234567"
+	if got := (Redactor{}).Text(digest); got != digest {
+		t.Errorf("hex digest was redacted: %q -> %q", digest, got)
 	}
 	if got := (Redactor{PII: true}).Text("contact test@example.com"); strings.Contains(got, "test@example.com") {
 		t.Fatalf("email leaked: %q", got)

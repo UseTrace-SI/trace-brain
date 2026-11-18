@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
 	"github.com/UseTrace-SI/trace-brain/internal/redact"
@@ -38,10 +39,13 @@ func Get(ctx context.Context, db *sql.DB, id string) (Memory, error) {
 // Update revises user-authored memories atomically with their search vector.
 // Derived memories remain owned by their source and cannot be silently edited.
 func Update(ctx context.Context, db *sql.DB, id, scope, content string, at int64) error {
-	if strings.TrimSpace(content) == "" || len(content) > 65536 || len(scope) > 1024 {
+	if strings.TrimSpace(content) == "" || len(content) > maxMemoryContentBytes || len(scope) > maxMemoryScopeBytes {
 		return fmt.Errorf("memory must contain 1–65536 bytes and scope at most 1024 bytes")
 	}
 	content = (redact.Redactor{}).Text(content)
+	if len(content) > maxMemoryContentBytes || !utf8.ValidString(content) {
+		return fmt.Errorf("redacted memory exceeds the 64 KiB content budget")
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -59,6 +63,9 @@ func Update(ctx context.Context, db *sql.DB, id, scope, content string, at int64
 		scope = oldScope
 	}
 	scope = (redact.Redactor{}).Text(scope)
+	if len(scope) > maxMemoryScopeBytes || !utf8.ValidString(scope) {
+		return fmt.Errorf("redacted memory exceeds the 1 KiB scope budget")
+	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO memory_revisions(memory_id,revision,scope,content,recorded_at) VALUES(?,1,?,?,?) ON CONFLICT(memory_id,revision) DO NOTHING", id, (redact.Redactor{}).Text(oldScope), (redact.Redactor{}).Text(oldContent), created); err != nil {
 		return err
 	}

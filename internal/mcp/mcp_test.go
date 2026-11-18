@@ -2,12 +2,119 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// A learned semantic scan holds a read connection while scanning up to 100k
+// rows. Other MCP tools must not starve on a single-connection pool. Holding a
+// read cursor open here simulates that scan; brain_remember must still commit
+// promptly (WAL readers do not block writers).
+func TestConcurrentSemanticScanDoesNotBlockBrainRemember(t *testing.T) {
+	db, err := store.Open(t.TempDir() + "/m.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := store.Remember(ctx, db, "seed", "project", "seed lexicalterm", "manual", 1); err != nil {
+		t.Fatal(err)
+	}
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := NewServer(db).Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+
+	rows, err := db.QueryContext(ctx, `SELECT substr(m.content,1,65537) FROM memories m LEFT JOIN semantic_embeddings e ON e.memory_id=m.id ORDER BY m.id LIMIT 100001`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatal("expected a seed row for the simulated scan")
+	}
+
+	writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	res, err := clientSession.CallTool(writeCtx, &mcp.CallToolParams{Name: "brain_remember", Arguments: map[string]any{"content": "written during scan"}})
+	if err != nil || res.IsError {
+		t.Fatalf("brain_remember blocked by a held semantic read: %v %v", err, res)
+	}
+	var n int
+	if err := db.QueryRow("SELECT count(*) FROM memories WHERE content LIKE '%written during scan%'").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("remember during scan not persisted: %d %v", n, err)
+	}
+}
+
+// Empty recall/query results must serialize as [] rather than null, and a
+// row-level scan failure in brief must not be swallowed.
+func TestEmptyRecallAndQuerySerializeAsEmptyArray(t *testing.T) {
+	db, err := store.Open(t.TempDir() + "/m.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := New(db)
+	for _, call := range []struct {
+		name string
+		fn   func(context.Context, *mcp.CallToolRequest) (any, error)
+	}{
+		{"recall", func(ctx context.Context, r *mcp.CallToolRequest) (any, error) {
+			_, out, err := s.recall(ctx, r, recallInput{Query: "nothing"})
+			return out, err
+		}},
+		{"query", func(ctx context.Context, r *mcp.CallToolRequest) (any, error) {
+			_, out, err := s.query(ctx, r, queryInput{Query: "nothing"})
+			return out, err
+		}},
+	} {
+		out, err := call.fn(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), `"memories":[]`) {
+			t.Fatalf("%s empty result serialized as %s", call.name, data)
+		}
+	}
+}
+
+func TestBriefDoesNotIgnoreScanErrors(t *testing.T) {
+	db, err := sql.Open("sqlite", t.TempDir()+"/m.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE memories(id TEXT PRIMARY KEY, scope TEXT, content TEXT, source TEXT, session_id TEXT, turn_id TEXT, created_at INTEGER);
+		CREATE VIRTUAL TABLE memory_fts USING fts5(content, content='memories', content_rowid='rowid');
+		CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memory_fts(rowid,content) VALUES(new.rowid,new.content); END;
+		INSERT INTO memories(id,scope,content,created_at) VALUES('m','project','matching lexicalterm',1);
+		UPDATE memories SET content=NULL`); err != nil {
+		t.Fatal(err)
+	}
+	// substr(NULL,...) yields NULL, which cannot be scanned into a string.
+	// Previously brief dropped such rows and reported success.
+	if _, _, err := New(db).brief(context.Background(), nil, briefInput{Task: "lexicalterm"}); err == nil {
+		t.Fatal("brief ignored a row scan error")
+	}
+}
 
 func TestMemoryTools(t *testing.T) {
 	db, err := store.Open(t.TempDir() + "/m.db")

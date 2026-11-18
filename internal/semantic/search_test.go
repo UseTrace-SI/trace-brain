@@ -2,7 +2,6 @@ package semantic
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -51,7 +50,7 @@ func searchSeed(t *testing.T, db *sql.DB, id, scope, text string, created int64,
 	if vector == nil {
 		return
 	}
-	if _, err := db.Exec(`INSERT INTO semantic_embeddings(memory_id,endpoint,model,digest,content_hash,dim,vector) VALUES(?,?,?,?,?,?,?)`, id, "http://127.0.0.1:11434", "test:1", strings.Repeat("a", 64), fmt.Sprintf("%x", sha256.Sum256([]byte(text))), len(vector), embed.Encode(vector)); err != nil {
+	if _, err := db.Exec(`INSERT INTO semantic_embeddings(memory_id,endpoint,model,digest,content_hash,dim,vector) VALUES(?,?,?,?,?,?,?)`, id, "http://127.0.0.1:11434", "test:1", strings.Repeat("a", 64), ContentHash(text), len(vector), embed.Encode(vector)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -98,7 +97,7 @@ func TestRegressionSemanticSearchRedactsQueriesAndBoundsUnicodeAndJSON(t *testin
 	if _, err := db.Exec("UPDATE memories SET content=? WHERE id='legacy'", legacy); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("INSERT INTO semantic_embeddings VALUES(?,?,?,?,?,?,?)", "legacy", "http://127.0.0.1:11434", "test:1", strings.Repeat("a", 64), fmt.Sprintf("%x", sha256.Sum256([]byte(legacy))), 2, embed.Encode([]float32{1, 0})); err != nil {
+	if _, err := db.Exec("INSERT INTO semantic_embeddings VALUES(?,?,?,?,?,?,?)", "legacy", "http://127.0.0.1:11434", "test:1", strings.Repeat("a", 64), ContentHash(legacy), 2, embed.Encode([]float32{1, 0})); err != nil {
 		t.Fatal(err)
 	}
 	provider := &searchModel{embed: func(ctx context.Context, texts []string) ([][]float32, error) {
@@ -180,6 +179,29 @@ func TestRegressionSemanticLegacyReadDoesNotMigrateOrWrite(t *testing.T) {
 	var count int
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='semantic_embeddings'").Scan(&count); err != nil || count != 0 {
 		t.Fatal("read changed schema", err)
+	}
+}
+
+// Cached vectors must be keyed to the exact redacted text sent to the model
+// and to the redaction algorithm version. A vector embedded under an older
+// redaction algorithm is stale even when the stored memory bytes are unchanged.
+func TestRegressionSemanticDetectsRedactionAlgorithmChange(t *testing.T) {
+	db := searchDB(t)
+	text := "a car ghp_abcdefghijklmnopqrstuvwxyz"
+	searchSeed(t, db, "current", "project", text, 1, nil)
+	searchSeed(t, db, "old", "project", text, 1, nil)
+	endpoint, model, digest := "http://127.0.0.1:11434", "test:1", strings.Repeat("a", 64)
+	for _, item := range []struct{ id, hash string }{
+		{"current", ContentHash(text)},
+		{"old", contentHash(text, "redact-v0")},
+	} {
+		if _, err := db.Exec(`INSERT INTO semantic_embeddings VALUES(?,?,?,?,?,?,?)`, item.id, endpoint, model, digest, item.hash, 2, embed.Encode([]float32{1, 0})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := Search(context.Background(), db, &searchModel{}, searchRequest())
+	if err != nil || out.Status != "ready" || out.IndexedMemories != 1 || out.StaleVectors != 1 || len(out.Memories) != 1 || out.Memories[0].ID != "current" {
+		t.Fatalf("redaction-version staleness not detected: %+v %v", out, err)
 	}
 }
 
