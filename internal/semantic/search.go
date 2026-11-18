@@ -28,6 +28,8 @@ type Factory func(string) (Provider, error)
 
 type SearchRequest struct {
 	Query, Scope, Model string
+	SourceDB            string
+	ExcludeDocuments    bool
 	Limit               int
 	MinScore            float64
 }
@@ -55,7 +57,7 @@ type SearchResponse struct {
 }
 
 func ValidateModel(model string) error {
-	if strings.TrimSpace(model) != model || model == "" || len(model) > 256 || !utf8.ValidString(model) || strings.ContainsFunc(model, unicode.IsControl) {
+	if strings.TrimSpace(model) != model || model == "" || len(model) > 256 || !utf8.ValidString(model) || strings.ContainsFunc(model, unicode.IsControl) || (redact.Redactor{}).Text(model) != model {
 		return fmt.Errorf("an exact installed model name of 1–256 bytes without control characters is required")
 	}
 	return nil
@@ -69,6 +71,9 @@ func ValidateSearch(in SearchRequest) error {
 	}
 	if len(in.Scope) > 256 || !utf8.ValidString(in.Scope) {
 		return fmt.Errorf("scope must contain at most 256 valid UTF-8 bytes")
+	}
+	if len(in.SourceDB) > 4096 || !utf8.ValidString(in.SourceDB) {
+		return fmt.Errorf("Trace source identity must contain at most 4096 valid UTF-8 bytes")
 	}
 	if in.Limit < 1 || in.Limit > 50 {
 		return fmt.Errorf("limit must be 1–50")
@@ -107,6 +112,26 @@ func snippet(content string) (string, bool) {
 	return content[:end], true
 }
 
+func searchFilter(in SearchRequest) (string, []any) {
+	filter, params := "", []any{}
+	if in.Scope != "" {
+		filter += " AND m.scope=?"
+		params = append(params, in.Scope)
+	}
+	if in.ExcludeDocuments {
+		filter += " AND COALESCE(m.source,'')!='document'"
+	}
+	if in.SourceDB != "" {
+		localSources := "('manual','mcp','document')"
+		if in.ExcludeDocuments {
+			localSources = "('manual','mcp')"
+		}
+		filter += " AND (m.source IN " + localSources + " OR EXISTS(SELECT 1 FROM memory_imports i WHERE i.memory_id=m.id AND i.source_db=?))"
+		params = append(params, in.SourceDB)
+	}
+	return filter, params
+}
+
 // Search never changes memory/cache state. Inference happens before opening the
 // bounded SQLite read; endpoint/model/digest/content identities must all match.
 func Search(ctx context.Context, db *sql.DB, provider Provider, in SearchRequest) (SearchResponse, error) {
@@ -143,12 +168,8 @@ func Search(ctx context.Context, db *sql.DB, provider Provider, in SearchRequest
 		return out, err
 	}
 	if exists == 0 {
-		query := "SELECT count(*) FROM (SELECT 1 FROM memories"
-		params := []any{}
-		if in.Scope != "" {
-			query += " WHERE scope=?"
-			params = append(params, in.Scope)
-		}
+		filter, params := searchFilter(in)
+		query := "SELECT count(*) FROM (SELECT 1 FROM memories m WHERE 1=1" + filter
 		query += " LIMIT 100001)"
 		if err := db.QueryRowContext(ctx, query, params...).Scan(&out.MissingVectors); err != nil {
 			return out, err
@@ -160,10 +181,9 @@ func Search(ctx context.Context, db *sql.DB, provider Provider, in SearchRequest
 	}
 	query := `SELECT substr(m.id,1,257),substr(m.scope,1,257),substr(COALESCE(m.source,''),1,257),substr(COALESCE(m.session_id,''),1,257),substr(COALESCE(m.turn_id,''),1,257),m.created_at,substr(CAST(m.content AS BLOB),1,65537),COALESCE(e.content_hash,''),COALESCE(e.dim,0),substr(e.vector,1,32769) FROM memories m LEFT JOIN semantic_embeddings e ON e.memory_id=m.id AND e.endpoint=? AND e.model=? AND e.digest=? WHERE 1=1`
 	params := []any{provider.Origin(), in.Model, digest}
-	if in.Scope != "" {
-		query += " AND m.scope=?"
-		params = append(params, in.Scope)
-	}
+	filter, selected := searchFilter(in)
+	query += filter
+	params = append(params, selected...)
 	query += " ORDER BY m.id LIMIT 100001"
 	rows, err := db.QueryContext(ctx, query, params...)
 	if err != nil {

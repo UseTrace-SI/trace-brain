@@ -98,8 +98,8 @@ func (o *Ollama) request(ctx context.Context, method, path string, body []byte, 
 }
 
 func (o *Ollama) Digest(ctx context.Context, model string) (string, error) {
-	if strings.TrimSpace(model) == "" || len(model) > 256 {
-		return "", fmt.Errorf("an exact installed model name of 1–256 bytes is required")
+	if err := ValidateModel(model); err != nil {
+		return "", err
 	}
 	var out struct {
 		Models []struct {
@@ -127,6 +127,9 @@ func (o *Ollama) Digest(ctx context.Context, model string) (string, error) {
 }
 
 func (o *Ollama) Embed(ctx context.Context, model string, texts []string) ([][]float32, error) {
+	if err := ValidateModel(model); err != nil {
+		return nil, err
+	}
 	if len(texts) == 0 || len(texts) > 16 {
 		return nil, fmt.Errorf("embedding batches must contain 1–16 texts")
 	}

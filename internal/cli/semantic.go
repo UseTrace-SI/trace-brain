@@ -29,6 +29,9 @@ func embedCmd(factory modelFactory) *cobra.Command {
 		if limit < 1 || limit > 1000 || offset < 0 || offset > 1_000_000 {
 			return fmt.Errorf("limit must be 1–1000 and offset 0–1000000")
 		}
+		if err := semantic.ValidateModel(model); err != nil {
+			return err
+		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
 		defer cancel()
 		provider, err := factory(endpoint)

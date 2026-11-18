@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
+	learned "github.com/UseTrace-SI/trace-brain/internal/semantic"
 	"github.com/spf13/cobra"
 )
 
@@ -33,31 +34,47 @@ func refreshCmd() *cobra.Command {
 // This read-only JSON contract is consumed by Trace CLI. It never creates a
 // database or runs extraction/agent commands during a context lookup.
 type memoryContext struct {
-	Protocol int          `json:"protocol"`
-	Status   string       `json:"status"`
-	Memories []memoryItem `json:"memories"`
+	Protocol  int                 `json:"protocol"`
+	Status    string              `json:"status"`
+	Memories  []memoryItem        `json:"memories"`
+	Retrieval string              `json:"retrieval,omitempty"`
+	Learned   *learnedContextInfo `json:"learned,omitempty"`
 }
 
 type memoryItem struct {
-	ID        string `json:"id"`
-	Scope     string `json:"scope"`
-	Content   string `json:"content"`
-	Source    string `json:"source"`
-	SessionID string `json:"session_id,omitempty"`
-	TurnID    string `json:"turn_id,omitempty"`
-	CreatedAt int64  `json:"created_at"`
+	ID               string   `json:"id"`
+	Scope            string   `json:"scope"`
+	Content          string   `json:"content"`
+	Source           string   `json:"source"`
+	SessionID        string   `json:"session_id,omitempty"`
+	TurnID           string   `json:"turn_id,omitempty"`
+	CreatedAt        int64    `json:"created_at"`
+	Score            *float64 `json:"score,omitempty"`
+	ContentTruncated bool     `json:"content_truncated,omitempty"`
 }
 
-func contextCmd() *cobra.Command {
+func contextCmd(factory modelFactory) *cobra.Command {
 	var query, source string
 	var limit int
 	var semantic bool
-	cmd := &cobra.Command{Use: "context", Short: "Read bounded memory context as protocol-1 JSON", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+	options := learnedContextOptions{}
+	cmd := &cobra.Command{Use: "context", Short: "Read bounded memory context as protocol-1 JSON", SilenceUsage: true, SilenceErrors: true, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if err := options.validate(cmd, query, limit, semantic); err != nil {
+			return err
+		}
+		timeout := 2 * time.Second
+		if options.model != "" {
+			timeout = time.Minute
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 		defer cancel()
 		cmd.SetContext(ctx)
 
 		out := memoryContext{Protocol: 1, Status: "missing_index", Memories: []memoryItem{}}
+		if options.model != "" {
+			out.Retrieval = "learned_local_ollama"
+			out.Learned = &learnedContextInfo{Model: options.model, ModelStatus: "not_probed", DocumentsIncluded: options.documents}
+		}
 		if len(query) > 4096 {
 			return fmt.Errorf("context query exceeds 4096 bytes")
 		}
@@ -100,6 +117,9 @@ func contextCmd() *cobra.Command {
 				out.Status = "needs_refresh"
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 			}
+		}
+		if options.model != "" {
+			return options.write(cmd, db, factory, learned.SearchRequest{Query: query, Model: options.model, Scope: options.scope, SourceDB: source, ExcludeDocuments: !options.documents, Limit: limit, MinScore: options.minScore})
 		}
 		if limit <= 0 || limit > 50 {
 			limit = 20
@@ -212,6 +232,11 @@ func contextCmd() *cobra.Command {
 	cmd.Flags().StringVar(&query, "query", "", "task words to recall (empty lists recent memories)")
 	cmd.Flags().StringVar(&source, "trace-db", "", "scope imported memories to this Trace source (defaults to current project when present)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "maximum memories (1-50)")
-	cmd.Flags().BoolVar(&semantic, "semantic", false, "rank by local embedding similarity instead of keyword search")
+	cmd.Flags().BoolVar(&semantic, "semantic", false, "rank by offline hashed-word similarity instead of keyword search")
+	cmd.Flags().StringVar(&options.model, "learned-model", "", "explicitly query this installed local Ollama model instead of offline retrieval")
+	cmd.Flags().StringVar(&options.endpoint, "learned-endpoint", "http://127.0.0.1:11434", "loopback Ollama origin for explicit learned context")
+	cmd.Flags().StringVar(&options.scope, "learned-scope", "", "exact memory scope for learned context")
+	cmd.Flags().Float64Var(&options.minScore, "learned-min-score", -1, "minimum learned cosine score (-1–1)")
+	cmd.Flags().BoolVar(&options.documents, "learned-include-documents", false, "include explicitly ingested local documents in learned context")
 	return cmd
 }

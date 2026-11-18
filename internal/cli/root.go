@@ -60,7 +60,7 @@ func newRootWithModelProvider(factory modelFactory) *cobra.Command {
 	root.AddCommand(dashCmd())
 	root.AddCommand(setupCmd())
 	root.AddCommand(mcpCmd(factory))
-	root.AddCommand(contextCmd())
+	root.AddCommand(contextCmd(factory))
 	root.AddCommand(refreshCmd())
 	return root
 }
