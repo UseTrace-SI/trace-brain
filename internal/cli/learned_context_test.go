@@ -3,15 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
+	learned "github.com/UseTrace-SI/trace-brain/internal/semantic"
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 )
 
@@ -52,7 +51,7 @@ func TestRegressionLearnedContextScopesHistoryAndRequiresDocumentConsent(t *test
 		if err := store.Remember(context.Background(), db, item.id, item.scope, text, item.kind, item.at); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.Exec("INSERT INTO semantic_embeddings VALUES(?,?,?,?,?,?,?)", item.id, "http://127.0.0.1:11434", "test:1", strings.Repeat("a", 64), fmt.Sprintf("%x", sha256.Sum256([]byte(text))), 2, embed.Encode([]float32{1, 0})); err != nil {
+		if _, err := db.Exec("INSERT INTO semantic_embeddings VALUES(?,?,?,?,?,?,?)", item.id, "http://127.0.0.1:11434", "test:1", strings.Repeat("a", 64), learned.ContentHash(text), 2, embed.Encode([]float32{1, 0})); err != nil {
 			t.Fatal(err)
 		}
 		if item.source != "" {

@@ -117,6 +117,18 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 				return false, err
 			}
 			defer writeTx.Rollback()
+			// The fingerprint was sampled before the external agent ran. A
+			// concurrent refresh can change the sampled evidence while the
+			// agent is working, so re-read it inside the write transaction and
+			// skip the now-stale extraction instead of committing it.
+			var current string
+			err = writeTx.QueryRowContext(ctx, "SELECT fingerprint FROM memory_imports WHERE source_db=? AND source=? AND entity_kind=? AND entity_id=?", path, source, kind, entityID).Scan(&current)
+			if err != nil && err != sql.ErrNoRows {
+				return false, err
+			}
+			if current != old {
+				return false, nil
+			}
 		}
 		id := fmt.Sprintf("import-%x", sha256.Sum256([]byte(path+"\x00"+source+"\x00"+kind+"\x00"+entityID)))
 		if _, err := writeTx.ExecContext(ctx, `INSERT INTO memories(id,scope,content,source,session_id,turn_id,created_at) VALUES(?,?,?,?,?,?,?)

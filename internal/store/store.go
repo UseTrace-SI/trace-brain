@@ -28,7 +28,16 @@ func Open(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	// A learned semantic scan can hold a read connection for a long time. WAL
+	// allows concurrent readers and a single writer, so keep a small pool:
+	// writes remain serialized by the IMMEDIATE transactions requested in the
+	// DSN, while reads never starve other MCP tools on one connection.
+	// In-memory databases are per-connection, so they must stay single.
+	if path == ":memory:" {
+		db.SetMaxOpenConns(1)
+	} else {
+		db.SetMaxOpenConns(8)
+	}
 	// Concurrent first opens can collide while enabling WAL, before SQLite's
 	// busy handler can wait. Retry only this idempotent initialization step.
 	var initializeErr error

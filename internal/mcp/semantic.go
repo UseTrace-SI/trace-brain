@@ -31,7 +31,7 @@ func NewServerWithSemantic(db *sql.DB, model, endpoint string, factory semantic.
 	if factory == nil {
 		factory = func(endpoint string) (semantic.Provider, error) { return semantic.NewOllama(endpoint) }
 	}
-	return newServer(db, &semanticOptions{model: model, endpoint: endpoint, factory: factory, gate: make(chan struct{}, 1)}), nil
+	return newServer(db, &semanticOptions{model: model, endpoint: endpoint, factory: factory, gate: make(chan struct{}, 1)}).server, nil
 }
 
 type semanticInput struct {

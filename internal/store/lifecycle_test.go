@@ -129,3 +129,32 @@ func TestMemoryConcurrentUpdatesAreVersionedAndDerivedMemoriesStaySourceOwned(t 
 		t.Fatal("accepted empty memory")
 	}
 }
+
+func TestRegressionUpdateRejectsOversizeAfterRedaction(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := Remember(ctx, db, "m", "project", "original", "mcp", 1); err != nil {
+		t.Fatal(err)
+	}
+	secret := "ghp_abcdefghijklmnopqrst"
+	content := strings.Repeat("a", 65536-len(secret)-1) + " " + secret
+	scope := strings.Repeat("s", 1024-len(secret)-1) + " " + secret
+	if err := Update(ctx, db, "m", "", content, 2); err == nil {
+		t.Fatal("accepted updated content that exceeds the budget after redaction")
+	}
+	if err := Update(ctx, db, "m", scope, "replacement", 3); err == nil {
+		t.Fatal("accepted updated scope that exceeds the budget after redaction")
+	}
+	m, err := Get(ctx, db, "m")
+	if err != nil || m.Content != "original" || m.Scope != "project" {
+		t.Fatalf("rejected update mutated the memory: %+v %v", m, err)
+	}
+	versions, err := History(ctx, db, "m")
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("rejected update created a revision: %+v %v", versions, err)
+	}
+}

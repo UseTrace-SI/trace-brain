@@ -2,14 +2,61 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
 	"github.com/UseTrace-SI/trace-brain/internal/redact"
 )
+
+const (
+	maxMemoryContentBytes = 65536
+	maxMemoryScopeBytes   = 1024
+)
+
+// redactMemoryText enforces the size budget after redaction. Redaction markers
+// expand the serialized bytes, so a raw payload that fits can overflow once a
+// secret is replaced. Oversized redacted text would be silently truncated by
+// Get/History (substr) and rejected downstream by fact evidence, embedding and
+// semantic cache checks. This mirrors factText in facts.go.
+func redactMemoryText(content, scope string) (string, string, error) {
+	if strings.TrimSpace(content) == "" || len(content) > maxMemoryContentBytes || len(scope) > maxMemoryScopeBytes {
+		return "", "", fmt.Errorf("memory must contain 1–65536 bytes and scope at most 1024 bytes")
+	}
+	r := redact.Redactor{}
+	content, scope = r.Text(content), r.Text(scope)
+	if len(content) > maxMemoryContentBytes || len(scope) > maxMemoryScopeBytes || !utf8.ValidString(content) || !utf8.ValidString(scope) {
+		return "", "", fmt.Errorf("redacted memory exceeds the 64 KiB content or 1 KiB scope budget")
+	}
+	return content, scope, nil
+}
+
+// NewMemoryID allocates a collision-resistant memory ID from crypto/rand,
+// checking the database and retrying so an existing ID is never reused. Time
+// stamps alone can collide within one nanosecond across concurrent writers.
+func NewMemoryID(ctx context.Context, db *sql.DB) (string, error) {
+	for attempt := 0; attempt < 5; attempt++ {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			continue
+		}
+		id := "mem-" + hex.EncodeToString(random[:])
+		var exists int
+		err := db.QueryRowContext(ctx, "SELECT 1 FROM memories WHERE id=?", id).Scan(&exists)
+		if err == sql.ErrNoRows {
+			return id, nil
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("could not allocate a unique memory ID")
+}
 
 // LiteralQuery treats task text as words rather than FTS operators.
 func LiteralQuery(text string) (string, error) {
@@ -30,11 +77,10 @@ func LiteralQuery(text string) (string, error) {
 }
 
 func Remember(ctx context.Context, db *sql.DB, id, scope, content, source string, at int64) error {
-	if strings.TrimSpace(content) == "" || len(content) > 65536 || len(scope) > 1024 {
-		return fmt.Errorf("memory must contain 1–65536 bytes and scope at most 1024 bytes")
+	var err error
+	if content, scope, err = redactMemoryText(content, scope); err != nil {
+		return err
 	}
-	content = (redact.Redactor{}).Text(content)
-	scope = (redact.Redactor{}).Text(scope)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

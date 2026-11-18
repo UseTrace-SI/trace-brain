@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -53,7 +52,7 @@ func semanticDB(t *testing.T) *sql.DB {
 	if err := store.Remember(context.Background(), db, "m", "project", text, "manual", 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("INSERT INTO semantic_embeddings VALUES(?,?,?,?,?,?,?)", "m", "http://127.0.0.1:11434", "test:1", strings.Repeat("a", 64), fmt.Sprintf("%x", sha256.Sum256([]byte(text))), 2, embed.Encode([]float32{1, 0})); err != nil {
+	if _, err := db.Exec("INSERT INTO semantic_embeddings VALUES(?,?,?,?,?,?,?)", "m", "http://127.0.0.1:11434", "test:1", strings.Repeat("a", 64), semantic.ContentHash(text), 2, embed.Encode([]float32{1, 0})); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -75,6 +74,43 @@ func semanticClient(t *testing.T, server *mcp.Server) *mcp.ClientSession {
 	}
 	t.Cleanup(func() { cs.Close() })
 	return cs
+}
+
+// Server.Run must run the already-constructed server (including opt-in tools),
+// not silently build a fresh one that drops brain_semantic and custom tools.
+func TestRunUsesConstructedServerWithRegisteredTools(t *testing.T) {
+	db, err := store.Open(t.TempDir() + "/m.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := New(db).Run(context.Background()); err == nil {
+		t.Fatal("raw Server.Run started a server without constructed tools")
+	}
+	options := &semanticOptions{
+		model:    "test:1",
+		endpoint: "http://127.0.0.1:11434",
+		factory:  func(string) (semantic.Provider, error) { return &mcpModel{}, nil },
+		gate:     make(chan struct{}, 1),
+	}
+	s := newServer(db, options)
+	if s.server == nil {
+		t.Fatal("constructed MCP server was not stored on the wrapper")
+	}
+	client := semanticClient(t, s.server)
+	tools, err := client.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, tool := range tools.Tools {
+		if tool.Name == "brain_semantic" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the stored server lost its registered brain_semantic tool")
+	}
 }
 
 func TestRegressionSemanticMCPIsOptInAndPinsProviderOverTransport(t *testing.T) {

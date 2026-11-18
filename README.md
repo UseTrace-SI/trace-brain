@@ -42,9 +42,9 @@ In an initialized Trace project, new databases default to `.trace/brain/memory.d
 
 Database writers reserve their SQLite write transaction before reading import fingerprints, so concurrent manual saves and daemon refreshes wait rather than fail with a stale-snapshot lock. Concurrent first opens retry transient WAL initialization contention.
 
-`setup` imports sessions and turns transactionally. Repeating it updates the same source entities without creating new memories. `extract` skips unchanged sessions, including external agent calls, and reports failures. Existing unlinked duplicates created by older versions are preserved. Refresh removes derived `trace-import` memories whose source entity was deleted; manual/MCP notes are retained.
+`setup` imports sessions and turns transactionally. Repeating it updates the same source entities without creating new memories. `extract` skips unchanged sessions, including external agent calls, and reports failures. It re-checks the evidence fingerprint inside its write transaction after the agent runs, so a concurrent refresh cannot commit a stale extraction. Existing unlinked duplicates created by older versions are preserved. Refresh removes derived `trace-import` memories whose source entity was deleted; manual/MCP notes are retained.
 
-`viz` escapes memory content as text and writes beside the selected `--db`. `query` is an alias in behavior for `recall`.
+`viz` escapes memory content as text, writes beside the selected `--db`, and renders at most the 1,000 most recent memories with explicit truncation reporting. `query` is an alias in behavior for `recall`.
 
 `watch` holds a per-database lock and supports `--daemon`. `stop` sends a private, instance-specific request and waits for an acknowledgement; it never signals a PID. Legacy PID-only watcher records are rejected. Stop an old watcher through its original terminal before upgrading. Extraction commands have a 30-second timeout.
 
@@ -58,9 +58,9 @@ Run `go test -race ./...` and `go test -race -run TestRegression -count=100 ./in
 
 Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline and keep at most 50 ranked candidates in memory. The existing context `--semantic` flag uses hashed word projections; it does not invoke a learned model. The separate explicit `embed` and `semantic` commands support learned vectors through a local Ollama service.
 
-MCP recall/query return at most 50 memories with 2,048 characters of content each. New manual/MCP memories are limited to 64 KiB and save their embedding atomically. Extraction caps stdout at 64 KiB and stderr at 4 KiB, cancels noisy subprocesses, and holds no memory-database transaction while waiting on an external agent. Successful extracted memories commit independently; an error leaves previous successful extractions intact for idempotent retry.
+MCP recall/query return at most 50 memories with 2,048 characters of content each. New manual/MCP memories are limited to 64 KiB after redaction and save their embedding atomically. Learned reads use a small connection pool so a long semantic scan cannot starve other MCP tools; writes remain serialized by IMMEDIATE transactions. Extraction caps stdout at 64 KiB and stderr at 4 KiB, cancels noisy subprocesses, and holds no memory-database transaction while waiting on an external agent. Successful extracted memories commit independently; an error leaves previous successful extractions intact for idempotent retry.
 
-Production builds select Go 1.27.3 to include the patched certificate verifier. CI pins this compiler and runs Govulncheck. The language version remains Go 1.26; release builds reject a different compiler. Existing runtime dependencies are pinned to their reviewed updates in go.mod/go.sum.
+Production builds select Go 1.27.4 to include the patched certificate verifier. CI pins this compiler and runs Govulncheck. The language version remains Go 1.26. Existing runtime dependencies are pinned to their reviewed updates in go.mod/go.sum.
 
 ## Extraction and retrieval quality
 
@@ -102,7 +102,8 @@ credentials in URLs, oversized responses and silent model input truncation are
 refused. Each inference batch is bounded to 16 texts and holds no SQLite transaction.
 
 Cached vectors are tied to the endpoint, model name, observed model digest and
-memory-content hash. Detected digest changes during inference abort that batch;
+a fingerprint of the exact redacted text sent to the model plus a redaction
+algorithm version, so changed redaction rules invalidate cached vectors. Detected digest changes during inference abort that batch;
 changed/deleted memories cannot receive an obsolete vector. Semantic queries
 report missing/stale vectors and omit them from ranking. Updating or forgetting
 a memory invalidates/removes its learned vectors. Ordinary context and MCP
