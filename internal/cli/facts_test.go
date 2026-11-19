@@ -5,11 +5,69 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 )
+
+func TestRegressionCLIFactEvidenceIsBoundedLikeMCP(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		// Just above the 16 KiB output cap: large enough to exercise truncation
+		// without paying for a 64 KiB capture on every CI repetition.
+		{"ascii", strings.Repeat("a", 20000)},
+		{"multibyte", strings.Repeat("中", 7000)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "memory.db")
+			db, err := store.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if err := store.Remember(ctx, db, "e", "project", tc.content, "manual", 1); err != nil {
+				t.Fatal(err)
+			}
+			fact, err := store.AssertFact(ctx, db, store.Fact{Scope: "project", Subject: "A", Predicate: "knows", Object: "B", EvidenceID: "e", ValidFrom: 0}, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			cmd := newRoot()
+			cmd.SetOut(&out)
+			cmd.SetErr(&out)
+			cmd.SetArgs([]string{"--db", path, "facts", "evidence", fact.ID})
+			if err := cmd.Execute(); err != nil {
+				t.Fatal(err)
+			}
+			var decoded struct {
+				Evidence         store.FactEvidence `json:"evidence"`
+				ContentBytes     int                `json:"content_bytes"`
+				ContentTruncated bool               `json:"content_truncated"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if !decoded.ContentTruncated || decoded.ContentBytes != len(tc.content) ||
+				len(decoded.Evidence.Content) > 16384 ||
+				!utf8.ValidString(decoded.Evidence.Content) {
+				t.Fatalf("unbounded/invalid CLI evidence: bytes=%d truncated=%v content=%d",
+					decoded.ContentBytes, decoded.ContentTruncated, len(decoded.Evidence.Content))
+			}
+			if decoded.Evidence.EvidenceHash != fact.EvidenceHash {
+				t.Fatal("capture hash lost")
+			}
+		})
+	}
+}
 
 func TestFactsCLIQueriesAndTraversesScopedTemporalClaims(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory.db")

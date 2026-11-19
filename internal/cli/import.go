@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
-	"github.com/UseTrace-SI/trace-brain/internal/redact"
+	"github.com/UseTrace-SI/trace-brain/internal/store"
 )
 
 func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extract bool) error {
@@ -57,15 +57,18 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 		source = "agent-extract"
 	}
 	save := func(kind, entityID, sid, tid, content string) (bool, error) {
+		var err error
 		if !extract {
 			if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO import_seen VALUES(?,?)", kind, entityID); err != nil {
 				return false, err
 			}
 		}
-		content = (redact.Redactor{}).Text(content)
+		content, err = store.RedactImportedContent(content)
+		if err != nil {
+			return false, err
+		}
 		fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(content+"\x00"+agentCmd)))
 		var old string
-		var err error
 		if extract {
 			err = db.QueryRowContext(ctx, "SELECT fingerprint FROM memory_imports WHERE source_db=? AND source=? AND entity_kind=? AND entity_id=?", path, source, kind, entityID).Scan(&old)
 		} else {
@@ -105,9 +108,9 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 			if err != nil {
 				return false, fmt.Errorf("extracting session %s: %w", sid, err)
 			}
-			content = (redact.Redactor{}).Text(strings.TrimSpace(output.String()))
-			if content == "" {
-				return false, fmt.Errorf("extracting session %s: empty response", sid)
+			content, err = store.RedactImportedContent(strings.TrimSpace(output.String()))
+			if err != nil {
+				return false, fmt.Errorf("extracting session %s: %w", sid, err)
 			}
 		}
 		writeTx := tx

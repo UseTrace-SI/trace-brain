@@ -13,6 +13,44 @@ import (
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
 )
 
+// runtimeCredential builds a 40-character mixed-class, high-entropy value at
+// runtime, so the source tree never contains a credential-shaped literal that
+// push protection would flag. The redactor recognizes this shape as a secret.
+func runtimeCredential() string {
+	const alphabet = "Ab3Cd5Ef7Gh9Jk1Lm2Np4Qr6"
+	value := make([]byte, 40)
+	for i := range value {
+		value[i] = alphabet[i%len(alphabet)]
+	}
+	return string(value)
+}
+
+func TestRegressionHistoryReappliesRedactionOnRead(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	secret := runtimeCredential()
+	// Write a revision directly to emulate a legacy or corrupted row whose
+	// content escaped write-time redaction. Reads must re-apply the policy.
+	if _, err := db.Exec("INSERT INTO memories(id,scope,content,source,created_at) VALUES('m','project','seed','manual',1)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO memory_revisions(memory_id,revision,scope,content,recorded_at) VALUES('m',1,?,?,2)", "scope "+secret, "content "+secret); err != nil {
+		t.Fatal(err)
+	}
+	revisions, err := History(ctx, db, "m")
+	if err != nil || len(revisions) != 1 {
+		t.Fatalf("history: %+v %v", revisions, err)
+	}
+	r := revisions[0]
+	if strings.Contains(r.Content, secret) || strings.Contains(r.Scope, secret) || !strings.Contains(r.Content, "redacted:") || !strings.Contains(r.Scope, "redacted:") {
+		t.Fatalf("history leaked unredacted revision: %+v", r)
+	}
+}
+
 func TestMemoryLifecyclePreservesRevisionsAndForgetsAllCopies(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(filepath.Join(t.TempDir(), "memory.db"))
@@ -127,6 +165,72 @@ func TestMemoryConcurrentUpdatesAreVersionedAndDerivedMemoriesStaySourceOwned(t 
 	}
 	if err := Update(ctx, db, "m", "", "", 100); err == nil {
 		t.Fatal("accepted empty memory")
+	}
+}
+
+func TestRegressionMemoryRevisionRetentionIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	ctx := context.Background()
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Remember(ctx, db, "m", "project", "initial", "mcp", 1); err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the real Update path, then add the remaining versions directly
+	// in one transaction. A full Update rewrites FTS, embeddings and vectors;
+	// repeating it ~60 times is unnecessary to verify the retention trigger and
+	// dominates this test when CI repeats the suite 100 times.
+	for i := 2; i <= 3; i++ {
+		if err := Update(ctx, db, "m", "", fmt.Sprintf("update %d", i), int64(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 4; i <= 60; i++ {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO memory_revisions(memory_id,revision,scope,content,recorded_at) VALUES('m',?,?,?,?)", i, "project", fmt.Sprintf("update %d", i), int64(i)); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT count(*) FROM memory_revisions WHERE memory_id='m'").Scan(&count); err != nil || count != 50 {
+		t.Fatalf("unbounded revisions: %d %v", count, err)
+	}
+	revisions, err := History(ctx, db, "m")
+	if err != nil || len(revisions) != 50 || revisions[0].Revision != 60 || revisions[len(revisions)-1].Revision != 11 {
+		t.Fatalf("wrong retained revisions: %d %+v %v", len(revisions), revisions, err)
+	}
+	// Simulate a database that accumulated revisions before the cap existed.
+	if _, err := db.Exec("DROP TRIGGER memory_revisions_cap"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 61; i <= 70; i++ {
+		if _, err := db.Exec("INSERT INTO memory_revisions(memory_id,revision,scope,content,recorded_at) VALUES('m',?,?,?,?)", i, "project", "old", int64(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.QueryRow("SELECT count(*) FROM memory_revisions WHERE memory_id='m'").Scan(&count); err != nil || count != 50 {
+		t.Fatalf("migration left unbounded revisions: %d %v", count, err)
+	}
+	revisions, err = History(ctx, db, "m")
+	if err != nil || len(revisions) != 50 || revisions[0].Revision != 70 {
+		t.Fatalf("migration kept wrong revisions: %+v %v", revisions, err)
 	}
 }
 

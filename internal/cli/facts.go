@@ -182,7 +182,9 @@ func factsCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"evidence": evidence, "known_at": known, "local_only": true})
+		content, bytes, truncated := store.CapFactEvidenceContent(evidence.Content)
+		evidence.Content = content
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"evidence": evidence, "known_at": known, "content_bytes": bytes, "content_truncated": truncated, "local_only": true})
 	}}
 	inspect.Flags().StringVar(&evidenceKnownAt, "known-at", "", "read captured evidence available at this recorded time (RFC3339)")
 	forget := &cobra.Command{Use: "forget ID", Args: cobra.ExactArgs(1), Short: "Delete this local claim and captured evidence; keep its source memory", RunE: func(cmd *cobra.Command, args []string) error {

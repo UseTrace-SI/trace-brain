@@ -53,6 +53,45 @@ func TestExtractionUsesChangedEvidenceAndRedactsOutput(t *testing.T) {
 		t.Fatalf("unsafe extracted memory: %s %v", content, err)
 	}
 }
+// Imported turn/session content must respect the same 64 KiB memory budget as
+// Remember and Update. Reads, embeddings, fact evidence and semantic caching
+// all assume memories fit in 64 KiB, so an unbounded import silently breaks
+// those invariants.
+func TestRegressionImportRejectsOversizedMemoryContent(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "trace.db")
+	dbPath = filepath.Join(dir, "memory.db")
+	src, err := sql.Open("sqlite", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if _, err := src.Exec(`CREATE TABLE sessions(id TEXT,agent TEXT,worktree TEXT,started_at INTEGER);
+		CREATE TABLE turns(id TEXT,session_id TEXT,seq INTEGER,prompt TEXT,reasoning TEXT);`); err != nil {
+		t.Fatal(err)
+	}
+	large := strings.Repeat("k", 70*1024)
+	if _, err := src.Exec(`INSERT INTO sessions VALUES('s','codex','repo',1);
+		INSERT INTO turns VALUES('t','s',1,?,'')`, large); err != nil {
+		t.Fatal(err)
+	}
+	// The import may reject the oversized entity outright, but it must never
+	// persist a memory larger than the shared content budget.
+	_ = importTrace(context.Background(), io.Discard, source, "", false)
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var maxLen int
+	if err := db.QueryRow("SELECT coalesce(max(length(content)),0) FROM memories").Scan(&maxLen); err != nil {
+		t.Fatal(err)
+	}
+	if maxLen > 65536 {
+		t.Fatalf("import stored an oversized memory: %d bytes", maxLen)
+	}
+}
+
 // The evidence fingerprint is read before the agent runs. If a concurrent
 // writer changes it while the agent is working, the post-agent write must
 // re-check inside its transaction and skip the now-stale extraction.

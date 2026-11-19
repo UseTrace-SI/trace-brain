@@ -48,7 +48,7 @@ Database writers reserve their SQLite write transaction before reading import fi
 
 `watch` holds a per-database lock and supports `--daemon`. `stop` sends a private, instance-specific request and waits for an acknowledgement; it never signals a PID. Legacy PID-only watcher records are rejected. Stop an old watcher through its original terminal before upgrading. Extraction commands have a 30-second timeout.
 
-Run `go test -race ./...` and `go test -race -run TestRegression -count=100 ./internal/cli` to verify the regression cases. macOS and Linux are supported.
+Run `go test -race -p 1 -count=1 ./...` for the full gate and `go test -race -count=100 -run 'TestRegression|TestCompanion' -timeout=10m ./...` to repeat the regression cases, matching `.github/workflows/ci.yml`. macOS and Linux are supported.
 
 ## Continuous integration
 
@@ -58,7 +58,7 @@ Run `go test -race ./...` and `go test -race -run TestRegression -count=100 ./in
 
 Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline and keep at most 50 ranked candidates in memory. The existing context `--semantic` flag uses hashed word projections; it does not invoke a learned model. The separate explicit `embed` and `semantic` commands support learned vectors through a local Ollama service.
 
-MCP recall/query return at most 50 memories with 2,048 characters of content each. New manual/MCP memories are limited to 64 KiB after redaction and save their embedding atomically. Learned reads use a small connection pool so a long semantic scan cannot starve other MCP tools; writes remain serialized by IMMEDIATE transactions. Extraction caps stdout at 64 KiB and stderr at 4 KiB, cancels noisy subprocesses, and holds no memory-database transaction while waiting on an external agent. Successful extracted memories commit independently; an error leaves previous successful extractions intact for idempotent retry.
+MCP recall/query return at most 50 memories with 2,048 bytes of content each (the same byte cap applies to CLI recall/query/brief); `history` caps each revised version at 2,048 runes and marks truncation explicitly. New manual/MCP memories are limited to 64 KiB after redaction and save their embedding atomically. Learned reads use a small connection pool so a long semantic scan cannot starve other MCP tools; writes remain serialized by IMMEDIATE transactions. Extraction caps stdout at 64 KiB and stderr at 4 KiB, cancels noisy subprocesses, and holds no memory-database transaction while waiting on an external agent. Successful extracted memories commit independently; an error leaves previous successful extractions intact for idempotent retry.
 
 Production builds select Go 1.27.4 to include the patched certificate verifier. CI pins this compiler and runs Govulncheck. The language version remains Go 1.26. Existing runtime dependencies are pinned to their reviewed updates in go.mod/go.sum.
 

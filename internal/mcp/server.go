@@ -3,9 +3,11 @@ package mcp
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/UseTrace-SI/trace-brain/internal/redact"
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -15,7 +17,33 @@ type Server struct {
 	server *mcp.Server
 }
 
+// mcpToolTimeout bounds a tool's database work. Without it, lock contention
+// can stall a request until SQLite's 30-second busy timeout. It is a variable
+// so offline tests can shorten it without weakening the production bound.
+var mcpToolTimeout = 2 * time.Second
+
+// withToolDeadline gives a tool its own deadline and returns a finish function
+// that cancels the context and turns a deadline expiry into an explicit error.
+func withToolDeadline(ctx context.Context, tool string) (context.Context, func(error) error) {
+	ctx, cancel := context.WithTimeout(ctx, mcpToolTimeout)
+	return ctx, func(err error) error {
+		cancel()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("%s timed out after %s: %w", tool, mcpToolTimeout, context.DeadlineExceeded)
+		}
+		return err
+	}
+}
+
 func New(db *sql.DB) *Server { return &Server{DB: db} }
+
+// readRedacted re-applies redaction to stored scope/content on read. Write-time
+// redaction alone cannot protect legacy rows or rows written by other tools, so
+// these read paths mirror the policy already applied by store.Get.
+func readRedacted(scope, content string) (string, string) {
+	r := redact.Redactor{}
+	return r.Text(scope), r.Text(content)
+}
 func NewServer(db *sql.DB) *mcp.Server {
 	return newServer(db, nil).server
 }
@@ -57,7 +85,9 @@ type rememberOutput struct {
 	ID string `json:"id"`
 }
 
-func (s *Server) remember(ctx context.Context, req *mcp.CallToolRequest, in rememberInput) (*mcp.CallToolResult, rememberOutput, error) {
+func (s *Server) remember(ctx context.Context, req *mcp.CallToolRequest, in rememberInput) (result *mcp.CallToolResult, out rememberOutput, err error) {
+	ctx, finish := withToolDeadline(ctx, "brain_remember")
+	defer func() { err = finish(err) }()
 	if in.Content == "" {
 		return nil, rememberOutput{}, fmt.Errorf("content required")
 	}
@@ -84,7 +114,9 @@ type recallOutput struct {
 	Memories []map[string]any `json:"memories"`
 }
 
-func (s *Server) recall(ctx context.Context, req *mcp.CallToolRequest, in recallInput) (*mcp.CallToolResult, recallOutput, error) {
+func (s *Server) recall(ctx context.Context, req *mcp.CallToolRequest, in recallInput) (result *mcp.CallToolResult, out recallOutput, err error) {
+	ctx, finish := withToolDeadline(ctx, "brain_recall")
+	defer func() { err = finish(err) }()
 	if in.Limit < 1 || in.Limit > 50 {
 		in.Limit = 20
 	}
@@ -98,16 +130,17 @@ func (s *Server) recall(ctx context.Context, req *mcp.CallToolRequest, in recall
 		return nil, recallOutput{}, err
 	}
 	defer rows.Close()
-	out := []map[string]any{}
+	memories := []map[string]any{}
 	for rows.Next() {
 		var id, scope, content string
 		var created int64
 		if err := rows.Scan(&id, &scope, &content, &created); err != nil {
 			return nil, recallOutput{}, err
 		}
-		out = append(out, map[string]any{"id": id, "scope": scope, "content": content, "created_at": created})
+		scope, content = readRedacted(scope, content)
+		memories = append(memories, map[string]any{"id": id, "scope": scope, "content": content, "created_at": created})
 	}
-	return nil, recallOutput{Memories: out}, rows.Err()
+	return nil, recallOutput{Memories: memories}, rows.Err()
 }
 
 type queryInput struct {
@@ -118,7 +151,9 @@ type queryOutput struct {
 	Memories []map[string]any `json:"memories"`
 }
 
-func (s *Server) query(ctx context.Context, req *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, queryOutput, error) {
+func (s *Server) query(ctx context.Context, req *mcp.CallToolRequest, in queryInput) (result *mcp.CallToolResult, out queryOutput, err error) {
+	ctx, finish := withToolDeadline(ctx, "brain_query")
+	defer func() { err = finish(err) }()
 	if in.Limit < 1 || in.Limit > 50 {
 		in.Limit = 20
 	}
@@ -131,16 +166,17 @@ func (s *Server) query(ctx context.Context, req *mcp.CallToolRequest, in queryIn
 		return nil, queryOutput{}, err
 	}
 	defer rows.Close()
-	out := []map[string]any{}
+	memories := []map[string]any{}
 	for rows.Next() {
 		var id, scope, content string
 		var created int64
 		if err := rows.Scan(&id, &scope, &content, &created); err != nil {
 			return nil, queryOutput{}, err
 		}
-		out = append(out, map[string]any{"id": id, "scope": scope, "content": content, "created_at": created})
+		scope, content = readRedacted(scope, content)
+		memories = append(memories, map[string]any{"id": id, "scope": scope, "content": content, "created_at": created})
 	}
-	return nil, queryOutput{Memories: out}, rows.Err()
+	return nil, queryOutput{Memories: memories}, rows.Err()
 }
 
 type briefInput struct {
@@ -150,7 +186,9 @@ type briefOutput struct {
 	Items []string `json:"items"`
 }
 
-func (s *Server) brief(ctx context.Context, req *mcp.CallToolRequest, in briefInput) (*mcp.CallToolResult, briefOutput, error) {
+func (s *Server) brief(ctx context.Context, req *mcp.CallToolRequest, in briefInput) (result *mcp.CallToolResult, out briefOutput, err error) {
+	ctx, finish := withToolDeadline(ctx, "brain_brief")
+	defer func() { err = finish(err) }()
 	query, err := store.LiteralQuery(in.Task)
 	if err != nil {
 		return nil, briefOutput{}, err
@@ -166,6 +204,7 @@ func (s *Server) brief(ctx context.Context, req *mcp.CallToolRequest, in briefIn
 		if err := rows.Scan(&c); err != nil {
 			return nil, briefOutput{}, err
 		}
+		_, c = readRedacted("", c)
 		items = append(items, c)
 	}
 	return nil, briefOutput{Items: items}, rows.Err()
