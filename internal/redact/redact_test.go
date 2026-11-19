@@ -69,6 +69,25 @@ func TestNegativesAndPII(t *testing.T) {
 	}
 }
 
+// A marker-shaped string immediately before a high-entropy token must not turn
+// off entropy redaction for that token. The preceding-context check used to
+// skip the candidate whenever a marker was nearby, letting a secret placed
+// right after a marker-shaped literal evade redaction entirely.
+func TestRedactionMarkerDoesNotHideFollowingSecret(t *testing.T) {
+	// 20 distinct letters have entropy log2(20) > 4.0 and no key-context word,
+	// so only the entropy fallback (or marker context) can redact this value.
+	secret := "abcdefghijklmnopqrst"
+	for _, input := range []string{
+		marker("env", "example") + " " + secret,
+		"KEY=" + marker("env", "example") + " " + secret,
+	} {
+		got := (Redactor{}).Text(input)
+		if strings.Contains(got, secret) || !strings.Contains(got, "⟨redacted:entropy:") {
+			t.Fatalf("secret after a marker was not redacted: %q", got)
+		}
+	}
+}
+
 func TestRedactionMarkersAreStable(t *testing.T) {
 	for _, tc := range []struct {
 		name, input, secret string

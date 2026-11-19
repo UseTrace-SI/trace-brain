@@ -92,7 +92,14 @@ func (r Redactor) Text(s string) string {
 		// recognized even without a nearby key label. Pure hex digests and
 		// UUIDs lack the mixed classes and remain untouched.
 		secretKey := looksLikeAWSKey(value)
-		if strings.Contains(original[from:start], "⟨redacted:") || !highEntropy || (!keyContext.MatchString(original[from:start]) && !secretKey) {
+		// A redaction marker in the preceding window means the surrounding
+		// text is already in a secret-bearing region. This used to *skip* the
+		// candidate, so a secret placed right after a marker-shaped literal
+		// evaded entropy redaction. Markers are never candidates themselves
+		// (no 20+ char alphanumeric run), so treating them as key context is
+		// both idempotent and closes the bypass.
+		markerContext := strings.Contains(original[from:start], "⟨redacted:")
+		if !highEntropy || (!keyContext.MatchString(original[from:start]) && !markerContext && !secretKey) {
 			continue
 		}
 		s = s[:start] + marker("entropy", value) + s[end:]
