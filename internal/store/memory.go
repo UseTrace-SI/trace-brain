@@ -36,6 +36,21 @@ func redactMemoryText(content, scope string) (string, string, error) {
 	return content, scope, nil
 }
 
+// RedactImportedContent applies the same content policy to memories assembled
+// outside Remember (session/turn and agent-extraction imports). Those paths
+// build their own INSERT and would otherwise bypass the size budget that
+// reads (substr), embeddings, fact evidence and semantic caching rely on.
+func RedactImportedContent(content string) (string, error) {
+	if strings.TrimSpace(content) == "" || len(content) > maxMemoryContentBytes {
+		return "", fmt.Errorf("imported memory must contain 1–65536 bytes")
+	}
+	content = (redact.Redactor{}).Text(content)
+	if len(content) > maxMemoryContentBytes || !utf8.ValidString(content) {
+		return "", fmt.Errorf("redacted imported memory exceeds the 64 KiB content budget")
+	}
+	return content, nil
+}
+
 // NewMemoryID allocates a collision-resistant memory ID from crypto/rand,
 // checking the database and retrying so an existing ID is never reused. Time
 // stamps alone can collide within one nanosecond across concurrent writers.
