@@ -10,9 +10,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/UseTrace-SI/trace-brain/internal/redact"
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/spf13/cobra"
 )
+
+// readRedacted re-applies redaction to stored scope/content on read. This
+// mirrors store.Get and the MCP read paths so legacy or externally written
+// rows cannot surface unredacted secrets through CLI output.
+func readRedacted(scope, content string) (string, string) {
+	r := redact.Redactor{}
+	return r.Text(scope), r.Text(content)
+}
 
 var dbPath string
 
@@ -151,6 +160,7 @@ func recallCmd() *cobra.Command {
 			if err := rows.Scan(&id, &scope, &content, &created); err != nil {
 				return err
 			}
+			scope, content = readRedacted(scope, content)
 			fmt.Fprintf(cmd.OutOrStdout(), "[%s] %s: %s\n", id, scope, content)
 		}
 		return rows.Err()
@@ -198,6 +208,7 @@ func briefCmd() *cobra.Command {
 		for rows.Next() {
 			var c string
 			if err := rows.Scan(&c); err == nil {
+				_, c = readRedacted("", c)
 				fmt.Fprintf(cmd.OutOrStdout(), "- %s\n", c)
 			}
 		}
@@ -232,6 +243,7 @@ func dashCmd() *cobra.Command {
 			for rows.Next() {
 				var id, scope, content string
 				if err := rows.Scan(&id, &scope, &content); err == nil {
+					scope, content = readRedacted(scope, content)
 					fmt.Fprintf(cmd.OutOrStdout(), "  [%s] %s: %s\n", id, scope, content)
 				}
 			}

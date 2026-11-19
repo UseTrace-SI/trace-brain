@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/UseTrace-SI/trace-brain/internal/redact"
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -16,6 +17,14 @@ type Server struct {
 }
 
 func New(db *sql.DB) *Server { return &Server{DB: db} }
+
+// readRedacted re-applies redaction to stored scope/content on read. Write-time
+// redaction alone cannot protect legacy rows or rows written by other tools, so
+// these read paths mirror the policy already applied by store.Get.
+func readRedacted(scope, content string) (string, string) {
+	r := redact.Redactor{}
+	return r.Text(scope), r.Text(content)
+}
 func NewServer(db *sql.DB) *mcp.Server {
 	return newServer(db, nil).server
 }
@@ -105,6 +114,7 @@ func (s *Server) recall(ctx context.Context, req *mcp.CallToolRequest, in recall
 		if err := rows.Scan(&id, &scope, &content, &created); err != nil {
 			return nil, recallOutput{}, err
 		}
+		scope, content = readRedacted(scope, content)
 		out = append(out, map[string]any{"id": id, "scope": scope, "content": content, "created_at": created})
 	}
 	return nil, recallOutput{Memories: out}, rows.Err()
@@ -138,6 +148,7 @@ func (s *Server) query(ctx context.Context, req *mcp.CallToolRequest, in queryIn
 		if err := rows.Scan(&id, &scope, &content, &created); err != nil {
 			return nil, queryOutput{}, err
 		}
+		scope, content = readRedacted(scope, content)
 		out = append(out, map[string]any{"id": id, "scope": scope, "content": content, "created_at": created})
 	}
 	return nil, queryOutput{Memories: out}, rows.Err()
@@ -166,6 +177,7 @@ func (s *Server) brief(ctx context.Context, req *mcp.CallToolRequest, in briefIn
 		if err := rows.Scan(&c); err != nil {
 			return nil, briefOutput{}, err
 		}
+		_, c = readRedacted("", c)
 		items = append(items, c)
 	}
 	return nil, briefOutput{Items: items}, rows.Err()

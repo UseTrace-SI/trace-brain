@@ -12,6 +12,67 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// runtimeCredential builds a credential-shaped value at runtime so the source
+// tree contains no literal that push protection would flag.
+func runtimeCredential() string {
+	const alphabet = "Ab3Cd5Ef7Gh9Jk1Lm2Np4Qr6"
+	value := make([]byte, 40)
+	for i := range value {
+		value[i] = alphabet[i%len(alphabet)]
+	}
+	return string(value)
+}
+
+func TestRegressionRecallQueryAndBriefReapplyRedactionOnRead(t *testing.T) {
+	db, err := store.Open(t.TempDir() + "/m.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	secret := runtimeCredential()
+	ctx := context.Background()
+	// Direct insert emulates a legacy/corrupted row that escaped write-time
+	// redaction. Read paths must re-apply the policy like Get does.
+	if _, err := db.Exec("INSERT INTO memories(id,scope,content,source,created_at) VALUES('m',?,?,'manual',1)", "scope "+secret, "lexicalterm "+secret); err != nil {
+		t.Fatal(err)
+	}
+	s := New(db)
+	for name, run := range map[string]func() (string, error){
+		"recall": func() (string, error) {
+			_, out, err := s.recall(ctx, nil, recallInput{Query: "lexicalterm"})
+			if err != nil {
+				return "", err
+			}
+			b, err := json.Marshal(out)
+			return string(b), err
+		},
+		"query": func() (string, error) {
+			_, out, err := s.query(ctx, nil, queryInput{Query: "lexicalterm"})
+			if err != nil {
+				return "", err
+			}
+			b, err := json.Marshal(out)
+			return string(b), err
+		},
+		"brief": func() (string, error) {
+			_, out, err := s.brief(ctx, nil, briefInput{Task: "lexicalterm"})
+			if err != nil {
+				return "", err
+			}
+			b, err := json.Marshal(out)
+			return string(b), err
+		},
+	} {
+		got, err := run()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if strings.Contains(got, secret) || !strings.Contains(got, "redacted:") {
+			t.Fatalf("%s leaked unredacted stored text: %s", name, got)
+		}
+	}
+}
+
 // A learned semantic scan holds a read connection while scanning up to 100k
 // rows. Other MCP tools must not starve on a single-connection pool. Holding a
 // read cursor open here simulates that scan; brain_remember must still commit
