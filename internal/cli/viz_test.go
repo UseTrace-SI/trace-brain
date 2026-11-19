@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,10 +17,15 @@ func TestRegressionVisualizationCapsRowsAndReportsTruncation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for i := 0; i < vizLimit+5; i++ {
-		if _, err := db.Exec("INSERT INTO memories(id,scope,content,created_at) VALUES(?,?,?,?)", fmt.Sprintf("m%04d", i), "project", "content", i); err != nil {
-			t.Fatal(err)
-		}
+	// Build the fixture with one SQL statement. Repeated per-row Exec calls
+	// through the pure-Go SQLite driver dominate this test under -race when CI
+	// repeats the regression suite 100 times.
+	if _, err := db.Exec(`WITH RECURSIVE seq(i) AS (
+		SELECT 0 UNION ALL SELECT i+1 FROM seq WHERE i < ?
+	)
+	INSERT INTO memories(id,scope,content,created_at)
+	SELECT printf('m%04d', i), 'project', 'content', i FROM seq`, vizLimit+4); err != nil {
+		t.Fatal(err)
 	}
 	out := filepath.Join(t.TempDir(), "viz.html")
 	truncated, err := renderVisualization(context.Background(), db, out)

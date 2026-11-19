@@ -18,8 +18,10 @@ func TestRegressionCLIFactEvidenceIsBoundedLikeMCP(t *testing.T) {
 		name    string
 		content string
 	}{
-		{"ascii", strings.Repeat("a", 65536)},
-		{"multibyte", strings.Repeat("中", 10000)},
+		// Just above the 16 KiB output cap: large enough to exercise truncation
+		// without paying for a 64 KiB capture on every CI repetition.
+		{"ascii", strings.Repeat("a", 20000)},
+		{"multibyte", strings.Repeat("中", 7000)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "memory.db")

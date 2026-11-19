@@ -178,10 +178,27 @@ func TestRegressionMemoryRevisionRetentionIsBounded(t *testing.T) {
 	if err := Remember(ctx, db, "m", "project", "initial", "mcp", 1); err != nil {
 		t.Fatal(err)
 	}
-	for i := 2; i <= 60; i++ {
+	// Exercise the real Update path, then add the remaining versions directly
+	// in one transaction. A full Update rewrites FTS, embeddings and vectors;
+	// repeating it ~60 times is unnecessary to verify the retention trigger and
+	// dominates this test when CI repeats the suite 100 times.
+	for i := 2; i <= 3; i++ {
 		if err := Update(ctx, db, "m", "", fmt.Sprintf("update %d", i), int64(i)); err != nil {
 			t.Fatal(err)
 		}
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 4; i <= 60; i++ {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO memory_revisions(memory_id,revision,scope,content,recorded_at) VALUES('m',?,?,?,?)", i, "project", fmt.Sprintf("update %d", i), int64(i)); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 	var count int
 	if err := db.QueryRow("SELECT count(*) FROM memory_revisions WHERE memory_id='m'").Scan(&count); err != nil || count != 50 {
