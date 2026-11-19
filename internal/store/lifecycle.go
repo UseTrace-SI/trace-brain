@@ -121,6 +121,10 @@ func History(ctx context.Context, db *sql.DB, id string) ([]Revision, error) {
 		if err := rows.Scan(&r.Revision, &r.Scope, &r.Content, &r.RecordedAt); err != nil {
 			return nil, err
 		}
+		// Defense in depth: legacy or corrupted rows can hold content that
+		// escaped write-time redaction. Apply the same read-time policy as Get.
+		r.Content = (redact.Redactor{}).Text(r.Content)
+		r.Scope = (redact.Redactor{}).Text(r.Scope)
 		result = append(result, r)
 	}
 	return result, rows.Err()

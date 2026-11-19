@@ -13,6 +13,44 @@ import (
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
 )
 
+// runtimeCredential builds a 40-character mixed-class, high-entropy value at
+// runtime, so the source tree never contains a credential-shaped literal that
+// push protection would flag. The redactor recognizes this shape as a secret.
+func runtimeCredential() string {
+	const alphabet = "Ab3Cd5Ef7Gh9Jk1Lm2Np4Qr6"
+	value := make([]byte, 40)
+	for i := range value {
+		value[i] = alphabet[i%len(alphabet)]
+	}
+	return string(value)
+}
+
+func TestRegressionHistoryReappliesRedactionOnRead(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	secret := runtimeCredential()
+	// Write a revision directly to emulate a legacy or corrupted row whose
+	// content escaped write-time redaction. Reads must re-apply the policy.
+	if _, err := db.Exec("INSERT INTO memories(id,scope,content,source,created_at) VALUES('m','project','seed','manual',1)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO memory_revisions(memory_id,revision,scope,content,recorded_at) VALUES('m',1,?,?,2)", "scope "+secret, "content "+secret); err != nil {
+		t.Fatal(err)
+	}
+	revisions, err := History(ctx, db, "m")
+	if err != nil || len(revisions) != 1 {
+		t.Fatalf("history: %+v %v", revisions, err)
+	}
+	r := revisions[0]
+	if strings.Contains(r.Content, secret) || strings.Contains(r.Scope, secret) || !strings.Contains(r.Content, "redacted:") || !strings.Contains(r.Scope, "redacted:") {
+		t.Fatalf("history leaked unredacted revision: %+v", r)
+	}
+}
+
 func TestMemoryLifecyclePreservesRevisionsAndForgetsAllCopies(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(filepath.Join(t.TempDir(), "memory.db"))
