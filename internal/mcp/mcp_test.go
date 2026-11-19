@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,52 @@ func runtimeCredential() string {
 		value[i] = alphabet[i%len(alphabet)]
 	}
 	return string(value)
+}
+
+func TestRegressionMCPMemoryToolsEnforceOwnDeadlines(t *testing.T) {
+	// Shorten the tool deadline so this regression stays fast even when CI
+	// repeats it 100 times. A parent deadline well above it distinguishes the
+	// tool's own bound from caller cancellation.
+	original := mcpToolTimeout
+	mcpToolTimeout = 50 * time.Millisecond
+	defer func() { mcpToolTimeout = original }()
+
+	db, err := store.Open(t.TempDir() + "/m.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// Occupy the only pooled connection so any tool query must wait until its
+	// own context deadline expires instead of SQLite's 30s busy timeout.
+	db.SetMaxOpenConns(1)
+	holder, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if _, err := holder.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer holder.ExecContext(context.Background(), "ROLLBACK")
+
+	s := New(db)
+	parent, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for name, call := range map[string]func(context.Context) error{
+		"brain_remember": func(ctx context.Context) error { _, _, err := s.remember(ctx, nil, rememberInput{Content: "x"}); return err },
+		"brain_recall":   func(ctx context.Context) error { _, _, err := s.recall(ctx, nil, recallInput{Query: "x"}); return err },
+		"brain_query":    func(ctx context.Context) error { _, _, err := s.query(ctx, nil, queryInput{Query: "x"}); return err },
+		"brain_brief":    func(ctx context.Context) error { _, _, err := s.brief(ctx, nil, briefInput{Task: "x"}); return err },
+	} {
+		start := time.Now()
+		err := call(parent)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("%s did not enforce its own deadline: %v", name, err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("%s stalled for %s instead of its own deadline", name, elapsed)
+		}
+	}
 }
 
 func TestRegressionRecallQueryAndBriefReapplyRedactionOnRead(t *testing.T) {
