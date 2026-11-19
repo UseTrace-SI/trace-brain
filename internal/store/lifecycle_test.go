@@ -168,6 +168,55 @@ func TestMemoryConcurrentUpdatesAreVersionedAndDerivedMemoriesStaySourceOwned(t 
 	}
 }
 
+func TestRegressionMemoryRevisionRetentionIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	ctx := context.Background()
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Remember(ctx, db, "m", "project", "initial", "mcp", 1); err != nil {
+		t.Fatal(err)
+	}
+	for i := 2; i <= 60; i++ {
+		if err := Update(ctx, db, "m", "", fmt.Sprintf("update %d", i), int64(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	if err := db.QueryRow("SELECT count(*) FROM memory_revisions WHERE memory_id='m'").Scan(&count); err != nil || count != 50 {
+		t.Fatalf("unbounded revisions: %d %v", count, err)
+	}
+	revisions, err := History(ctx, db, "m")
+	if err != nil || len(revisions) != 50 || revisions[0].Revision != 60 || revisions[len(revisions)-1].Revision != 11 {
+		t.Fatalf("wrong retained revisions: %d %+v %v", len(revisions), revisions, err)
+	}
+	// Simulate a database that accumulated revisions before the cap existed.
+	if _, err := db.Exec("DROP TRIGGER memory_revisions_cap"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 61; i <= 70; i++ {
+		if _, err := db.Exec("INSERT INTO memory_revisions(memory_id,revision,scope,content,recorded_at) VALUES('m',?,?,?,?)", i, "project", "old", int64(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.QueryRow("SELECT count(*) FROM memory_revisions WHERE memory_id='m'").Scan(&count); err != nil || count != 50 {
+		t.Fatalf("migration left unbounded revisions: %d %v", count, err)
+	}
+	revisions, err = History(ctx, db, "m")
+	if err != nil || len(revisions) != 50 || revisions[0].Revision != 70 {
+		t.Fatalf("migration kept wrong revisions: %+v %v", revisions, err)
+	}
+}
+
 func TestRegressionUpdateRejectsOversizeAfterRedaction(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(filepath.Join(t.TempDir(), "memory.db"))

@@ -11,6 +11,11 @@ import (
 	"github.com/UseTrace-SI/trace-brain/internal/redact"
 )
 
+// maxMemoryRevisions bounds stored versions per memory. History reads the same
+// number of most-recent revisions, so older versions are unreachable and are
+// pruned at write time (and at migration time for pre-existing databases).
+const maxMemoryRevisions = 50
+
 type Memory struct {
 	ID        string `json:"id"`
 	Scope     string `json:"scope"`
@@ -110,7 +115,7 @@ func Forget(ctx context.Context, db *sql.DB, id string) error {
 }
 
 func History(ctx context.Context, db *sql.DB, id string) ([]Revision, error) {
-	rows, err := db.QueryContext(ctx, "SELECT revision,scope,substr(content,1,65536),recorded_at FROM memory_revisions WHERE memory_id=? ORDER BY revision DESC LIMIT 50", id)
+	rows, err := db.QueryContext(ctx, "SELECT revision,scope,substr(content,1,65536),recorded_at FROM memory_revisions WHERE memory_id=? ORDER BY revision DESC LIMIT ?", id, maxMemoryRevisions)
 	if err != nil {
 		return nil, err
 	}

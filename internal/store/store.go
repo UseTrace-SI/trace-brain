@@ -62,7 +62,7 @@ func Open(path string) (*sql.DB, error) {
 }
 
 func migrate(db *sql.DB) error {
-	const schema = `
+	schema := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, scope TEXT NOT NULL, content TEXT NOT NULL,
   source TEXT, session_id TEXT, turn_id TEXT, created_at INTEGER NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(content, content='memories', content_rowid='rowid');
@@ -136,7 +136,17 @@ END;
 CREATE TRIGGER IF NOT EXISTS fact_evidence_usage_keep BEFORE DELETE ON fact_evidence_usage BEGIN
  SELECT RAISE(ABORT,'fact_evidence_usage_required');
 END;
-`
+CREATE TRIGGER IF NOT EXISTS memory_revisions_cap AFTER INSERT ON memory_revisions BEGIN
+  DELETE FROM memory_revisions WHERE memory_id=NEW.memory_id AND revision NOT IN
+    (SELECT revision FROM memory_revisions WHERE memory_id=NEW.memory_id ORDER BY revision DESC LIMIT %d);
+END;
+DELETE FROM memory_revisions WHERE rowid IN (
+  SELECT rowid FROM (
+    SELECT rowid, row_number() OVER (PARTITION BY memory_id ORDER BY revision DESC) AS retention_rank
+    FROM memory_revisions
+  ) WHERE retention_rank > %d
+);
+`, maxMemoryRevisions, maxMemoryRevisions)
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("migrating: %w", err)
 	}
