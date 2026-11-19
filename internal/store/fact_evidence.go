@@ -9,6 +9,22 @@ import (
 	"github.com/UseTrace-SI/trace-brain/internal/redact"
 )
 
+// MaxFactEvidenceOutputBytes is the shared bound for evidence content returned
+// to callers by both the CLI and MCP evidence readers.
+const MaxFactEvidenceOutputBytes = 16384
+
+// CapFactEvidenceContent truncates content to the shared output bound on a
+// valid UTF-8 boundary. It returns the capped content, the full byte length of
+// the capture and whether truncation occurred.
+func CapFactEvidenceContent(content string) (string, int, bool) {
+	full := len(content)
+	end := min(full, MaxFactEvidenceOutputBytes)
+	for end > 0 && !utf8.ValidString(content[:end]) {
+		end--
+	}
+	return content[:end], full, end < full
+}
+
 // Captured evidence proves which redacted bytes were bound to a claim, not
 // that the claim is true or that its source has been independently verified.
 type FactEvidence struct {

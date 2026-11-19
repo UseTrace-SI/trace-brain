@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"time"
-	"unicode/utf8"
 
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -78,11 +77,7 @@ func (s *Server) factEvidence(ctx context.Context, _ *mcp.CallToolRequest, input
 	if err != nil {
 		return nil, factEvidenceOutput{}, err
 	}
-	bytes := len(evidence.Content)
-	end := min(bytes, 16384)
-	for end > 0 && !utf8.ValidString(evidence.Content[:end]) {
-		end--
-	}
-	evidence.Content = evidence.Content[:end]
-	return nil, factEvidenceOutput{Evidence: evidence, KnownAt: known, ContentBytes: bytes, ContentTruncated: len(evidence.Content) < bytes}, nil
+	content, bytes, truncated := store.CapFactEvidenceContent(evidence.Content)
+	evidence.Content = content
+	return nil, factEvidenceOutput{Evidence: evidence, KnownAt: known, ContentBytes: bytes, ContentTruncated: truncated}, nil
 }
