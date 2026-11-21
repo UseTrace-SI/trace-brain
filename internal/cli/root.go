@@ -222,10 +222,11 @@ func setupCmd() *cobra.Command {
 		if len(args) > 0 {
 			traceDB = args[0]
 		}
+		started := time.Now()
 		if err := importTrace(cmd.Context(), cmd.OutOrStdout(), traceDB, "", false); err != nil {
 			return err
 		}
-		return writeExtractionText(cmd.OutOrStdout(), extractAfterImport(cmd.Context()))
+		return writeExtractionText(cmd.OutOrStdout(), extractAfterImport(cmd.Context(), started))
 	}}
 }
 

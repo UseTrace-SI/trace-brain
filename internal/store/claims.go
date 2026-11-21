@@ -26,6 +26,39 @@ const (
 	ExtractorOllama = "ollama"
 )
 
+// ExtractorID identifies who derives claims. Rules claims are reconciled
+// across rule versions; learned claims only against the same model's earlier
+// claims, so running a second model never retracts the first one's claims.
+type ExtractorID struct {
+	Kind    string // ExtractorRules or ExtractorOllama
+	Model   string // learned model name; empty for rules
+	Version string // rules version, or model@digest
+}
+
+// RulesExtractor is the deterministic extractor's identity.
+var RulesExtractor = ExtractorID{Kind: ExtractorRules, Version: extract.RulesVersion}
+
+// LearnedExtractor is the identity of an installed local model at a digest.
+func LearnedExtractor(model, digest string) ExtractorID {
+	return ExtractorID{Kind: ExtractorOllama, Model: model, Version: model + "@" + digest}
+}
+
+// family keys extraction state: one row per memory and rules or model.
+func (id ExtractorID) family() string {
+	if id.Kind == ExtractorOllama {
+		return id.Kind + ":" + id.Model
+	}
+	return id.Kind
+}
+
+func (id ExtractorID) valid() bool {
+	return (id.Kind == ExtractorRules && id.Model == "" || id.Kind == ExtractorOllama && id.Model != "" && strings.HasPrefix(id.Version, id.Model+"@")) &&
+		id.Version != "" && len(id.Version) <= 512
+}
+
+// claimsOf selects the claims of memory @memory derived by this extractor.
+const claimsOfSQL = `f.evidence_id=@memory AND s.extractor=@kind AND (@model='' OR substr(s.version,1,length(@model)+1)=@model||'@')`
+
 // ExtractionFactLimit keeps part of the shared 10,000-claim budget available
 // for manual assertions; extraction stops adding claims at this total.
 const ExtractionFactLimit = 8000
@@ -319,12 +352,12 @@ func quoteHash(quote string) string {
 
 // PendingExtraction selects memories never extracted by extractor at version,
 // or changed since. Updates clear extraction state through a trigger.
-func PendingExtraction(ctx context.Context, q queryer, extractor, version string, limit, offset int) ([]ExtractionMemory, error) {
+func PendingExtraction(ctx context.Context, q queryer, id ExtractorID, limit, offset int) ([]ExtractionMemory, error) {
 	rows, err := q.QueryContext(ctx, `SELECT m.id,m.scope,COALESCE(m.source,''),COALESCE(m.session_id,''),COALESCE(m.turn_id,''),substr(m.content,1,65537),
  COALESCE((SELECT t.source_at FROM memory_source_times t WHERE t.memory_id=m.id),(SELECT max(r.recorded_at) FROM memory_revisions r WHERE r.memory_id=m.id),m.created_at)
  FROM memories m LEFT JOIN fact_extraction_state s ON s.memory_id=m.id AND s.extractor=?
  WHERE m.source IN `+extractionSources+` AND NOT (m.source='trace-import' AND COALESCE(m.turn_id,'')='') AND (s.memory_id IS NULL OR s.version<>?)
- ORDER BY m.created_at,m.id LIMIT ? OFFSET ?`, extractor, version, limit, offset)
+ ORDER BY m.created_at,m.id LIMIT ? OFFSET ?`, id.family(), id.Version, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -355,10 +388,10 @@ func PendingExtraction(ctx context.Context, q queryer, extractor, version string
 }
 
 // CountPendingExtraction counts pending memories, capped at 100,001.
-func CountPendingExtraction(ctx context.Context, q queryer, extractor, version string) (int, error) {
+func CountPendingExtraction(ctx context.Context, q queryer, id ExtractorID) (int, error) {
 	var n int
 	err := q.QueryRowContext(ctx, `SELECT count(*) FROM (SELECT 1 FROM memories m LEFT JOIN fact_extraction_state s ON s.memory_id=m.id AND s.extractor=?
- WHERE m.source IN `+extractionSources+` AND NOT (m.source='trace-import' AND COALESCE(m.turn_id,'')='') AND (s.memory_id IS NULL OR s.version<>?) LIMIT 100001)`, extractor, version).Scan(&n)
+ WHERE m.source IN `+extractionSources+` AND NOT (m.source='trace-import' AND COALESCE(m.turn_id,'')='') AND (s.memory_id IS NULL OR s.version<>?) LIMIT 100001)`, id.family(), id.Version).Scan(&n)
 	return n, err
 }
 
@@ -427,12 +460,50 @@ func normalizeClaims(scope, content string, claims []extract.Claim) ([]normalize
 	return out, rejected
 }
 
-// RecordExtractionSkip marks a memory as handled at version without changing
-// its claims, e.g. when it exceeds a learned extractor's input bound.
-func RecordExtractionSkip(ctx context.Context, tx *sql.Tx, memory ExtractionMemory, extractor, version string, at int64) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO fact_extraction_state(memory_id,extractor,version,content_hash,claims,extracted_at)
- SELECT id,?,?,?,0,? FROM memories WHERE id=? ON CONFLICT(memory_id,extractor) DO UPDATE SET version=excluded.version,content_hash=excluded.content_hash,
- claims=excluded.claims,extracted_at=excluded.extracted_at`, extractor, version, memory.ContentHash, at, memory.ID)
+// RecordExtractionSkip marks a memory handled at the extractor's version when
+// no claims could be derived (input over a learned extractor's bound, invalid
+// or truncated model output). Like ApplyExtraction it first re-checks that the
+// memory still holds the selected content, leaving a changed memory pending;
+// claims of this extractor whose quote is no longer in the memory are
+// retracted, and the others are kept.
+func RecordExtractionSkip(ctx context.Context, tx *sql.Tx, memory ExtractionMemory, id ExtractorID, at int64) (ExtractionReport, error) {
+	report := ExtractionReport{Extractor: id.Kind, Version: id.Version}
+	if !id.valid() || at < 0 {
+		return report, fmt.Errorf("invalid extractor identity or time")
+	}
+	unchanged, err := memoryUnchanged(ctx, tx, memory)
+	if err != nil || !unchanged {
+		report.Changed = 1
+		return report, err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE facts SET retracted_at=max(@at,recorded_at) WHERE retracted_at IS NULL AND id IN (SELECT f.id FROM facts f
+ JOIN fact_sources s ON s.fact_id=f.id JOIN memories m ON m.id=f.evidence_id WHERE `+claimsOfSQL+` AND instr(m.content,s.quote)=0)`,
+		sql.Named("at", at), sql.Named("memory", memory.ID), sql.Named("kind", id.Kind), sql.Named("model", id.Model))
+	if err != nil {
+		return report, err
+	}
+	retracted, err := result.RowsAffected()
+	if err != nil {
+		return report, err
+	}
+	report.Retracted, report.Skipped = int(retracted), 1
+	return report, recordState(ctx, tx, memory, id, 0, at)
+}
+
+// memoryUnchanged re-reads a memory inside the write transaction.
+func memoryUnchanged(ctx context.Context, tx *sql.Tx, memory ExtractionMemory) (bool, error) {
+	var current string
+	err := tx.QueryRowContext(ctx, "SELECT substr(content,1,65537) FROM memories WHERE id=?", memory.ID).Scan(&current)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil && extractionHash((redact.Redactor{}).Text(current)) == memory.ContentHash, err
+}
+
+func recordState(ctx context.Context, tx *sql.Tx, memory ExtractionMemory, id ExtractorID, claims int, at int64) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO fact_extraction_state(memory_id,extractor,version,content_hash,claims,extracted_at) VALUES(?,?,?,?,?,?)
+ ON CONFLICT(memory_id,extractor) DO UPDATE SET version=excluded.version,content_hash=excluded.content_hash,claims=excluded.claims,extracted_at=excluded.extracted_at`,
+		memory.ID, id.family(), id.Version, memory.ContentHash, claims, at)
 	return err
 }
 
@@ -442,23 +513,15 @@ func RecordExtractionSkip(ctx context.Context, tx *sql.Tx, memory ExtractionMemo
 // unless they would require closing a manual claim or tie with a
 // contradicting claim at the same instant. The memory must still hold the
 // extracted content; otherwise it is left pending.
-func ApplyExtraction(ctx context.Context, tx *sql.Tx, memory ExtractionMemory, extractor, version string, claims []extract.Claim, at int64) (ExtractionReport, error) {
-	report := ExtractionReport{Extractor: extractor, Version: version}
-	if extractor != ExtractorRules && extractor != ExtractorOllama || version == "" || len(version) > 512 || at < 0 {
+func ApplyExtraction(ctx context.Context, tx *sql.Tx, memory ExtractionMemory, id ExtractorID, claims []extract.Claim, at int64) (ExtractionReport, error) {
+	report := ExtractionReport{Extractor: id.Kind, Version: id.Version}
+	if !id.valid() || at < 0 {
 		return report, fmt.Errorf("invalid extractor identity or time")
 	}
-	var current string
-	err := tx.QueryRowContext(ctx, "SELECT substr(content,1,65537) FROM memories WHERE id=?", memory.ID).Scan(&current)
-	if err == sql.ErrNoRows {
-		report.Changed++
-		return report, nil
-	}
-	if err != nil {
+	unchanged, err := memoryUnchanged(ctx, tx, memory)
+	if err != nil || !unchanged {
+		report.Changed = 1
 		return report, err
-	}
-	if extractionHash((redact.Redactor{}).Text(current)) != memory.ContentHash {
-		report.Changed++
-		return report, nil
 	}
 	desired, rejected := normalizeClaims(memory.Scope, memory.Content, claims)
 	report.Rejected = rejected
@@ -467,7 +530,7 @@ func ApplyExtraction(ctx context.Context, tx *sql.Tx, memory ExtractionMemory, e
 		desired = nil
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT f.id,f.scope,f.subject,f.predicate,f.object,s.quote,f.retracted_at IS NOT NULL,f.recorded_at FROM facts f
- JOIN fact_sources s ON s.fact_id=f.id WHERE f.evidence_id=? AND s.extractor=?`, memory.ID, extractor)
+ JOIN fact_sources s ON s.fact_id=f.id WHERE `+claimsOfSQL, sql.Named("memory", memory.ID), sql.Named("kind", id.Kind), sql.Named("model", id.Model))
 	if err != nil {
 		return report, err
 	}
@@ -547,14 +610,14 @@ func ApplyExtraction(ctx context.Context, tx *sql.Tx, memory ExtractionMemory, e
 			accepted++
 			continue
 		}
-		id, err := newFactID()
+		factID, err := newFactID()
 		if err != nil {
 			return report, err
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO facts VALUES(?,?,?,?,?,?,NULL,?,NULL,?,?,?)", id, memory.Scope, c.Subject, c.Predicate, c.Object, memory.ValidFrom, at, memory.ID, quoteHash(c.Quote), c.Exclusive); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO facts VALUES(?,?,?,?,?,?,NULL,?,NULL,?,?,?)", factID, memory.Scope, c.Subject, c.Predicate, c.Object, memory.ValidFrom, at, memory.ID, quoteHash(c.Quote), c.Exclusive); err != nil {
 			return report, fmt.Errorf("adding extracted claim: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO fact_sources(fact_id,extractor,version,quote) VALUES(?,?,?,?)", id, extractor, version, c.Quote); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO fact_sources(fact_id,extractor,version,quote) VALUES(?,?,?,?)", factID, id.Kind, id.Version, c.Quote); err != nil {
 			return report, fmt.Errorf("recording claim evidence: %w", err)
 		}
 		total++
@@ -566,10 +629,7 @@ func ApplyExtraction(ctx context.Context, tx *sql.Tx, memory ExtractionMemory, e
 		// Stay pending so the remaining claims are added once capacity exists.
 		return report, nil
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO fact_extraction_state(memory_id,extractor,version,content_hash,claims,extracted_at) VALUES(?,?,?,?,?,?)
- ON CONFLICT(memory_id,extractor) DO UPDATE SET version=excluded.version,content_hash=excluded.content_hash,claims=excluded.claims,extracted_at=excluded.extracted_at`,
-		memory.ID, extractor, version, memory.ContentHash, accepted, at)
-	return report, err
+	return report, recordState(ctx, tx, memory, id, accepted, at)
 }
 
 // claimBlocked reports whether adding c from valid time from would require
@@ -645,7 +705,9 @@ func newFactID() (string, error) {
 type RulesOptions struct {
 	Limit  int           // memories per pass, 1–10,000
 	Budget time.Duration // no new batch starts after this much time
-	At     int64         // recorded time of added/retracted claims
+	// At, when nonzero, fixes the recorded time (tests). Otherwise each batch
+	// records the time at which its write transaction began.
+	At int64
 }
 
 // ExtractRules runs the deterministic extractor over pending memories in
@@ -660,7 +722,7 @@ func ExtractRules(ctx context.Context, db *sql.DB, options RulesOptions) (Extrac
 		if options.Budget > 0 && time.Since(start) > options.Budget {
 			break
 		}
-		batch, err := rulesBatch(ctx, db, min(64, options.Limit-report.Memories-report.Changed), options.At)
+		batch, err := rulesBatch(ctx, db, min(32, options.Limit-report.Memories-report.Changed), options.At)
 		if err != nil {
 			return report, err
 		}
@@ -669,25 +731,29 @@ func ExtractRules(ctx context.Context, db *sql.DB, options RulesOptions) (Extrac
 		}
 		report.Add(batch)
 	}
-	pending, err := CountPendingExtraction(ctx, db, ExtractorRules, extract.RulesVersion)
+	pending, err := CountPendingExtraction(ctx, db, RulesExtractor)
 	report.Pending = pending
 	return report, err
 }
 
-func rulesBatch(ctx context.Context, db *sql.DB, limit int, at int64) (ExtractionReport, error) {
+func rulesBatch(ctx context.Context, db *sql.DB, limit int, fixed int64) (ExtractionReport, error) {
 	report := ExtractionReport{}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return report, err
 	}
 	defer tx.Rollback()
-	memories, err := PendingExtraction(ctx, tx, ExtractorRules, extract.RulesVersion, limit, 0)
+	at := fixed
+	if at == 0 {
+		at = time.Now().UnixMilli()
+	}
+	memories, err := PendingExtraction(ctx, tx, RulesExtractor, limit, 0)
 	if err != nil {
 		return report, err
 	}
 	for _, memory := range memories {
 		claims := extract.Rules(extract.Input{Text: memory.Content, Reference: memory.Reference(), TurnFormat: memory.TurnFormat()})
-		result, err := ApplyExtraction(ctx, tx, memory, ExtractorRules, extract.RulesVersion, claims, at)
+		result, err := ApplyExtraction(ctx, tx, memory, RulesExtractor, claims, at)
 		if err != nil {
 			return report, err
 		}

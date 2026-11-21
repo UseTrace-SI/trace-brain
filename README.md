@@ -276,18 +276,22 @@ newer claim, its evidence memory, its start and when it was recorded).
 
 Manual claims are never closed automatically. An extracted claim that would close
 an active manual claim, or that contradicts another claim at the identical
-instant, is skipped and counted in `conflicts_skipped`. Extraction state is kept
-per memory and extractor version, and a trigger marks a memory pending when its
-content or scope changes, so re-running adds no duplicates. On re-extraction
+instant, is skipped and counted in `conflicts_skipped`. A value restated by more
+memories while three active claims already hold it is not recorded again
+(`claims_already_held`). Extraction state is kept per memory for the rules and for
+each learned model, with their version, and a trigger marks a memory pending when
+its content or scope changes, so re-running adds no duplicates. Claims are recorded
+at the time their write transaction begins. On re-extraction
 identical claims are kept, unsupported ones are retracted (still visible at an
 earlier `--known-at`), and a claim once retracted — by the extractor or with
 `facts retract` — is not restored. Forgetting a memory, or refresh removing a
 derived memory whose source turn was deleted, deletes its claims as before.
 
-Each setup/refresh processes at most 500 pending memories in batched IMMEDIATE
-transactions and starts no new batch after about 15 seconds; the remainder is
-reported as `pending` in the refresh JSON `facts` object and `facts extract
---limit N` (1–10,000) processes it explicitly. Extraction stops adding claims at
+Each setup/refresh processes at most 500 pending memories in batches of 32 IMMEDIATE
+transactions and starts no new batch after 15 seconds of extraction or 40 seconds
+after the command began (Trace stops refresh at one minute); the remainder is
+reported as `pending` in the refresh JSON `facts` object, and `facts extract
+--limit N` (1–10,000, no new batch after 45 seconds) processes it explicitly. Extraction stops adding claims at
 8,000 claims in total (of the shared 10,000) and reports `budget_exhausted`.
 Extraction errors are reported as `facts.error` and never fail the import.
 Extracted claims cite a quote rather than a captured copy: in the default current
@@ -315,5 +319,9 @@ text is sent once with a JSON schema at temperature 0; larger memories are skipp
 and counted rather than truncated. A learned claim must use the same predicates,
 quote a sentence that occurs verbatim in the memory and name its value inside that
 quote; other output is rejected. Learned claims record their model and digest and
-take part in the same invalidation. Only offline protocol tests exist; live model
+take part in the same invalidation. Each model's claims are reconciled only against
+that model's earlier claims (a new digest of the same model re-checks them), so
+running another model never retracts them. An oversized memory or invalid or
+token-limited output is recorded as skipped only if the memory is unchanged; that
+model's claims whose quote has left the memory are then retracted. Only offline protocol tests exist; live model
 quality and latency are unmeasured.

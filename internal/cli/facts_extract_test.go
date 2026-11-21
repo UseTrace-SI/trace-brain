@@ -240,7 +240,10 @@ func TestLearnedExtractionIsExplicitGroundedAndHoldsNoTransaction(t *testing.T) 
 		return `{"claims":[{"subject":"queue","predicate":"uses","object":"NATS","quote":"We switched the queue from RabbitMQ to NATS."},
 			{"subject":"queue","predicate":"uses","object":"kafka","quote":"invented sentence"}]}`
 	}
+	var generatedAt int64
 	fake.during = func() {
+		time.Sleep(5 * time.Millisecond)
+		generatedAt = time.Now().UnixMilli()
 		// No SQLite transaction is held while the model runs.
 		db, err := store.Open(path)
 		if err != nil {
@@ -269,6 +272,10 @@ func TestLearnedExtractionIsExplicitGroundedAndHoldsNoTransaction(t *testing.T) 
 	queue := listFacts(t, path, "--subject", "queue")["queue uses nats"]
 	if queue.Extractor != "ollama" || queue.ExtractorVersion != "m:1@"+digest {
 		t.Fatalf("learned claim: %+v", queue)
+	}
+	// The claim is recorded at commit, after inference, not before it.
+	if queue.RecordedAt < generatedAt {
+		t.Fatalf("claim recorded at %d before inference finished at %d", queue.RecordedAt, generatedAt)
 	}
 	fake.digests = []string{digest, strings.Repeat("b", 64)}
 	runBrain(t, path, "remember", "We use Bazel for builds.")
@@ -330,5 +337,22 @@ func TestCompanionContextFactsAreOptInBoundedAndCurrent(t *testing.T) {
 		if err := cmd.Execute(); err == nil {
 			t.Fatalf("accepted %v", args)
 		}
+	}
+}
+
+// Extraction after a slow import must not push refresh past Trace's one-minute
+// limit: once the import used the deadline, extraction is deferred and the
+// backlog is reported as pending.
+func TestExtractionAfterSlowImportIsDeferredAndReported(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	runBrain(t, path, "remember", "We use Ruff for linting.")
+	old := dbPath
+	dbPath = path
+	defer func() { dbPath = old }()
+	if summary := extractAfterImport(context.Background(), time.Now().Add(-importDeadline)); summary.Error != "" || summary.Memories != 0 || summary.Pending != 1 {
+		t.Fatalf("extraction ran past the import deadline: %+v", summary)
+	}
+	if summary := extractAfterImport(context.Background(), time.Now()); summary.Error != "" || summary.Added != 1 || summary.Pending != 0 {
+		t.Fatalf("extraction within the deadline: %+v", summary)
 	}
 }

@@ -18,9 +18,12 @@ import (
 )
 
 // automaticExtraction bounds the deterministic pass that follows setup and
-// refresh. Trace allows refresh one minute, so a large backlog is processed
-// over several refreshes and reported as pending.
+// refresh. Trace stops refresh after one minute, so extraction never starts
+// a batch after importDeadline has elapsed since the command began, and a
+// large backlog is processed over several refreshes and reported as pending.
 var automaticExtraction = store.RulesOptions{Limit: 500, Budget: 15 * time.Second}
+
+const importDeadline = 40 * time.Second
 
 type factsSummary struct {
 	store.ExtractionReport
@@ -29,14 +32,22 @@ type factsSummary struct {
 
 // extractAfterImport runs the bounded rules pass. Its failure never fails the
 // memory import that preceded it; callers report it instead.
-func extractAfterImport(ctx context.Context) factsSummary {
+func extractAfterImport(ctx context.Context, started time.Time) factsSummary {
 	db, err := openDB()
 	if err != nil {
 		return factsSummary{Error: "fact extraction unavailable: " + err.Error()}
 	}
 	defer db.Close()
 	options := automaticExtraction
-	options.At = time.Now().UnixMilli()
+	options.Budget = min(options.Budget, importDeadline-time.Since(started))
+	if options.Budget <= 0 {
+		pending, err := store.CountPendingExtraction(ctx, db, store.RulesExtractor)
+		summary := factsSummary{ExtractionReport: store.ExtractionReport{Extractor: store.ExtractorRules, Version: store.RulesExtractor.Version, Pending: pending}}
+		if err != nil {
+			summary.Error = "fact extraction failed: " + err.Error()
+		}
+		return summary
+	}
 	report, err := store.ExtractRules(ctx, db, options)
 	summary := factsSummary{ExtractionReport: report}
 	if err != nil {
@@ -200,9 +211,11 @@ func factsExtractCmd() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+			// The budget ends the pass before the deadline, so committed
+			// batches are reported rather than lost to a cancelled context.
 			ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
 			defer cancel()
-			report, err := store.ExtractRules(ctx, db, store.RulesOptions{Limit: limit, At: time.Now().UnixMilli()})
+			report, err := store.ExtractRules(ctx, db, store.RulesOptions{Limit: limit, Budget: 45 * time.Second})
 			if err != nil {
 				return err
 			}
@@ -283,37 +296,43 @@ func learnedExtraction(parent context.Context, model, endpoint string, limit int
 		return report, err
 	}
 	report.ModelDigest = digest
-	version := model + "@" + digest
+	id := store.LearnedExtractor(model, digest)
 	db, err := openDB()
 	if err != nil {
 		return report, err
 	}
 	defer db.Close()
-	report.Facts = store.ExtractionReport{Extractor: store.ExtractorOllama, Version: version}
-	memories, err := store.PendingExtraction(ctx, db, store.ExtractorOllama, version, limit, 0)
+	report.Facts = store.ExtractionReport{Extractor: store.ExtractorOllama, Version: id.Version}
+	memories, err := store.PendingExtraction(ctx, db, id, limit, 0)
 	if err != nil {
 		return report, err
 	}
-	commit := func(apply func(*sql.Tx) error) error {
+	// Each memory commits on its own; its recorded time is taken once the
+	// write transaction has begun, after inference, so it never precedes the
+	// commit by the duration of a model call.
+	commit := func(apply func(tx *sql.Tx, at int64) (store.ExtractionReport, error)) (store.ExtractionReport, error) {
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
-			return err
+			return store.ExtractionReport{}, err
 		}
 		defer tx.Rollback()
-		if err := apply(tx); err != nil {
-			return err
+		result, err := apply(tx, time.Now().UnixMilli())
+		if err != nil {
+			return result, err
 		}
-		return tx.Commit()
+		return result, tx.Commit()
+	}
+	skip := func(tx *sql.Tx, memory store.ExtractionMemory, at int64) (store.ExtractionReport, error) {
+		return store.RecordExtractionSkip(ctx, tx, memory, id, at)
 	}
 	for _, memory := range memories {
-		at := time.Now().UnixMilli()
 		if memory.Oversized || len(memory.Content) > extract.LearnedInputBytes {
-			report.SkippedOversized++
-			if err := commit(func(tx *sql.Tx) error {
-				return store.RecordExtractionSkip(ctx, tx, memory, store.ExtractorOllama, version, at)
-			}); err != nil {
+			result, err := commit(func(tx *sql.Tx, at int64) (store.ExtractionReport, error) { return skip(tx, memory, at) })
+			if err != nil {
 				return report, err
 			}
+			report.SkippedOversized += result.Skipped
+			report.Facts.Add(result)
 			continue
 		}
 		output, err := provider.Generate(ctx, model, extract.LearnedPrompt(memory.Content), extract.LearnedSchema)
@@ -329,23 +348,25 @@ func learnedExtraction(parent context.Context, model, endpoint string, limit int
 		if err != nil {
 			parseErr = err
 		}
-		err = commit(func(tx *sql.Tx) error {
+		result, err := commit(func(tx *sql.Tx, at int64) (store.ExtractionReport, error) {
 			if parseErr != nil {
-				report.InvalidOutput++
-				return store.RecordExtractionSkip(ctx, tx, memory, store.ExtractorOllama, version, at)
+				return skip(tx, memory, at)
 			}
-			result, err := store.ApplyExtraction(ctx, tx, memory, store.ExtractorOllama, version, claims, at)
+			result, err := store.ApplyExtraction(ctx, tx, memory, id, claims, at)
 			result.Rejected += rejected
-			report.Facts.Add(result)
-			return err
+			return result, err
 		})
 		if err != nil {
 			return report, err
 		}
+		if parseErr != nil {
+			report.InvalidOutput += result.Skipped
+		}
+		report.Facts.Add(result)
 		if report.Facts.BudgetExhausted {
 			break
 		}
 	}
-	report.Facts.Pending, err = store.CountPendingExtraction(ctx, db, store.ExtractorOllama, version)
+	report.Facts.Pending, err = store.CountPendingExtraction(ctx, db, id)
 	return report, err
 }

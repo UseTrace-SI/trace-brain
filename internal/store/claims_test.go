@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/UseTrace-SI/trace-brain/internal/extract"
 )
 
 func claimsDB(t *testing.T) *sql.DB {
@@ -136,7 +138,7 @@ func TestExtractionReconcilesChangedMemoriesWithoutAlteringThem(t *testing.T) {
 	if err := Update(ctx, db, "m", "", "Never run gofmt before committing. Use Ruff for linting.", 2000); err != nil {
 		t.Fatal(err)
 	}
-	if pending, err := CountPendingExtraction(ctx, db, ExtractorRules, "rules-v1"); err != nil || pending != 1 {
+	if pending, err := CountPendingExtraction(ctx, db, RulesExtractor); err != nil || pending != 1 {
 		t.Fatalf("changed memory is not pending: %d %v", pending, err)
 	}
 	report := extractAll(t, db, 3000)
@@ -351,5 +353,83 @@ func TestRestatedValuesAreHeldByBoundedClaims(t *testing.T) {
 	}
 	if got := current(t, db, "storage", 350, 1000); len(got) != 1 || got["uses:sqlite"].ValidFrom != 300 {
 		t.Fatalf("value restated after a change was not recorded: %+v", got)
+	}
+}
+
+func applyLearned(t *testing.T, db *sql.DB, memory ExtractionMemory, id ExtractorID, claims []extract.Claim, at int64, skip bool) ExtractionReport {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	var report ExtractionReport
+	if skip {
+		report, err = RecordExtractionSkip(context.Background(), tx, memory, id, at)
+	} else {
+		report, err = ApplyExtraction(context.Background(), tx, memory, id, claims, at)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return report
+}
+
+func pendingFor(t *testing.T, db *sql.DB, id ExtractorID) []ExtractionMemory {
+	t.Helper()
+	memories, err := PendingExtraction(context.Background(), db, id, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return memories
+}
+
+// Learned claims used to be reconciled across all models, so running another
+// model retracted the first model's claims for good; skips recorded state
+// without re-checking content and never reconciled old claims.
+func TestLearnedClaimsAreModelScopedAndSkipsRecheckContent(t *testing.T) {
+	ctx := context.Background()
+	db := claimsDB(t)
+	quote := "We switched the queue from RabbitMQ to NATS."
+	if err := Remember(ctx, db, "m", "project", quote, "manual", 100); err != nil {
+		t.Fatal(err)
+	}
+	claim := []extract.Claim{{Subject: "queue", Predicate: "uses", Object: "nats", Quote: quote}}
+	a, b := LearnedExtractor("a:1", strings.Repeat("a", 64)), LearnedExtractor("b:1", strings.Repeat("b", 64))
+	if report := applyLearned(t, db, pendingFor(t, db, a)[0], a, claim, 1000, false); report.Added != 1 {
+		t.Fatalf("model a: %+v", report)
+	}
+	if report := applyLearned(t, db, pendingFor(t, db, b)[0], b, nil, 1100, false); report.Retracted != 0 {
+		t.Fatalf("model b retracted model a's claim: %+v", report)
+	}
+	if got := current(t, db, "queue", 2000, 2000); got["uses:nats"].ExtractorVersion != a.Version {
+		t.Fatalf("model a claim lost: %+v", got)
+	}
+	updated := LearnedExtractor("a:1", strings.Repeat("c", 64))
+	if report := applyLearned(t, db, pendingFor(t, db, updated)[0], updated, claim, 1200, false); report.Unchanged != 1 || report.Added != 0 {
+		t.Fatalf("a model update did not reconcile its own claims: %+v", report)
+	}
+	selected := pendingFor(t, db, LearnedExtractor("d:1", strings.Repeat("d", 64)))[0]
+	if err := Update(ctx, db, "m", "", quote+" Ship weekly.", 1300); err != nil {
+		t.Fatal(err)
+	}
+	if report := applyLearned(t, db, selected, LearnedExtractor("d:1", strings.Repeat("d", 64)), nil, 1400, true); report.Changed != 1 || report.Skipped != 0 {
+		t.Fatalf("skip of changed content was recorded: %+v", report)
+	}
+	if len(pendingFor(t, db, LearnedExtractor("d:1", strings.Repeat("d", 64)))) != 1 {
+		t.Fatal("changed memory is no longer pending")
+	}
+	if err := Update(ctx, db, "m", "", strings.Repeat("Unrelated text. ", 1200), 1500); err != nil {
+		t.Fatal(err)
+	}
+	oversized := pendingFor(t, db, updated)[0]
+	if report := applyLearned(t, db, oversized, updated, nil, 1600, true); report.Skipped != 1 || report.Retracted != 1 {
+		t.Fatalf("skip kept a claim whose quote is gone: %+v", report)
+	}
+	if len(pendingFor(t, db, updated)) != 0 {
+		t.Fatal("skipped memory stays pending")
 	}
 }

@@ -24,11 +24,12 @@ import (
 func refreshCmd() *cobra.Command {
 	var source string
 	cmd := &cobra.Command{Use: "refresh", Short: "Import Trace history and return protocol-1 JSON", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		started := time.Now()
 		if err := importTrace(cmd.Context(), io.Discard, source, "", false); err != nil {
 			return err
 		}
 		// Extraction is bounded and reported; it never fails the import.
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "status": "ready", "facts": extractAfterImport(cmd.Context())})
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "status": "ready", "facts": extractAfterImport(cmd.Context(), started)})
 	}}
 	cmd.Flags().StringVar(&source, "trace-db", ".trace/trace.db", "Trace history database (read-only)")
 	return cmd
