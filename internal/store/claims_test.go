@@ -237,3 +237,46 @@ func TestExtractionBudgetTiesAndOversizedMemoriesStayBounded(t *testing.T) {
 		t.Fatalf("pending memory not completed after capacity returned: %+v", report)
 	}
 }
+
+func TestRetractedClaimsAreNotRestoredAndScopeChangesReExtract(t *testing.T) {
+	ctx := context.Background()
+	db := claimsDB(t)
+	if err := Remember(ctx, db, "m", "project", "Use Jest for tests.", "manual", 100); err != nil {
+		t.Fatal(err)
+	}
+	extractAll(t, db, 1000)
+	jest := current(t, db, "tests", 200, 1000)["uses:jest"]
+	if err := RetractFact(ctx, db, jest.ID, 1100); err != nil {
+		t.Fatal(err)
+	}
+	// Editing the note away and back re-extracts it, but the retracted claim
+	// stays retracted instead of being silently recreated.
+	for i, text := range []string{"Use Jest for tests. Ship weekly.", "Use Jest for tests."} {
+		if err := Update(ctx, db, "m", "", text, int64(1200+i)); err != nil {
+			t.Fatal(err)
+		}
+		if report := extractAll(t, db, int64(2000+i)); report.Memories != 1 || report.Added != 0 || report.Suppressed != 1 {
+			t.Fatalf("retracted claim restored: %+v", report)
+		}
+	}
+	if got := current(t, db, "tests", 3000, 3000); len(got) != 0 {
+		t.Fatalf("retracted claim is current again: %s", keys(got))
+	}
+	if err := Remember(ctx, db, "n", "project", "Use Ruff for linting.", "manual", 100); err != nil {
+		t.Fatal(err)
+	}
+	extractAll(t, db, 3100)
+	if err := Update(ctx, db, "n", "tooling", "Use Ruff for linting.", 3200); err != nil {
+		t.Fatal(err)
+	}
+	if report := extractAll(t, db, 3300); report.Memories != 1 || report.Retracted != 1 || report.Added != 1 {
+		t.Fatalf("scope change was not re-extracted: %+v", report)
+	}
+	moved, err := QueryFacts(ctx, db, FactQuery{Scope: "tooling", Subject: "linting", At: 3400, KnownAt: 3400, Limit: 10})
+	if err != nil || len(moved.Facts) != 1 || moved.Facts[0].Object != "ruff" {
+		t.Fatalf("claim not in the new scope: %+v %v", moved, err)
+	}
+	if old := current(t, db, "linting", 3400, 3400); len(old) != 0 {
+		t.Fatalf("claim left in the old scope: %s", keys(old))
+	}
+}
