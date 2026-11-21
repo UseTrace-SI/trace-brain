@@ -190,7 +190,9 @@ func contextCmd(factory modelFactory) *cobra.Command {
 				limit = len(candidates)
 			}
 			for i := 0; i < limit; i++ {
-				out.Memories = append(out.Memories, candidates[i].item)
+				item := candidates[i].item
+				item.Scope, item.Content = readRedacted(item.Scope, item.Content)
+				out.Memories = append(out.Memories, item)
 			}
 		} else {
 			q := `SELECT m.id,m.scope,substr(m.content,1,2048),COALESCE(m.source,''),COALESCE(m.session_id,''),COALESCE(m.turn_id,''),m.created_at FROM memories m`
@@ -221,6 +223,9 @@ func contextCmd(factory modelFactory) *cobra.Command {
 				if err := rows.Scan(&item.ID, &item.Scope, &item.Content, &item.Source, &item.SessionID, &item.TurnID, &item.CreatedAt); err != nil {
 					return err
 				}
+				// Context output can be published by Trace; legacy or externally
+				// written rows must not bypass the read-time redaction policy.
+				item.Scope, item.Content = readRedacted(item.Scope, item.Content)
 				out.Memories = append(out.Memories, item)
 			}
 			if err := rows.Err(); err != nil {

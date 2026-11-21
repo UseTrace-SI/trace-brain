@@ -87,6 +87,7 @@ func workspaceCmd() *cobra.Command {
 				if err = rows.Scan(&item.ID, &item.Scope, &item.Content, &item.Source, &item.SessionID, &item.TurnID, &item.CreatedAt); err != nil {
 					break
 				}
+				item.Scope, item.Content = readRedacted(item.Scope, item.Content)
 				ranked = append(ranked, workspaceMemory{Database: path, Rank: len(ranked) + 1, memoryItem: item})
 			}
 			if err == nil {

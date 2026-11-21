@@ -70,6 +70,9 @@ IDs, treats quoted text as untrusted data and fingerprints the sampled evidence,
 so changed outcomes invalidate an earlier extraction. The extractor must not infer
 a successful test merely from an intention to run it. All imported, extracted,
 manual and MCP memory content passes through secret-pattern redaction before storage.
+Read paths (recall/query/brief, context, workspace retrieval, dash, viz, get and
+history) re-apply redaction to stored scope and content, so a legacy row cannot
+bypass the current policy.
 
 Keyword retrieval ranks by SQLite FTS relevance with deterministic recency ties.
 The optional hashed-word ranker omits zero-overlap results; it remains a lexical
