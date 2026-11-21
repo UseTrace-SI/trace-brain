@@ -13,9 +13,11 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
 	learned "github.com/UseTrace-SI/trace-brain/internal/semantic"
+	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -40,6 +42,49 @@ type memoryContext struct {
 	Memories  []memoryItem        `json:"memories"`
 	Retrieval string              `json:"retrieval,omitempty"`
 	Learned   *learnedContextInfo `json:"learned,omitempty"`
+	// Facts and FactsTruncated appear only when --facts is requested.
+	Facts          []contextFact `json:"facts,omitempty"`
+	FactsTruncated bool          `json:"facts_truncated,omitempty"`
+}
+
+// contextFact is a compact current claim; quotes are capped for context.
+type contextFact struct {
+	ID         string `json:"id"`
+	Subject    string `json:"subject"`
+	Predicate  string `json:"predicate"`
+	Object     string `json:"object"`
+	ValidFrom  int64  `json:"valid_from"`
+	ValidTo    *int64 `json:"valid_to,omitempty"`
+	Origin     string `json:"origin"`
+	Quote      string `json:"quote,omitempty"`
+	EvidenceID string `json:"evidence_id"`
+	TurnID     string `json:"turn_id,omitempty"`
+}
+
+const maxContextQuoteBytes = 256
+
+func contextFacts(cmd *cobra.Command, db *sql.DB, words []string, limit int) ([]contextFact, bool, error) {
+	terms := make([]string, len(words))
+	for i, word := range words {
+		terms[i] = strings.Trim(word, `"`)
+	}
+	facts, truncated, err := store.ContextFacts(cmd.Context(), db, terms, limit, time.Now().UnixMilli())
+	if err != nil {
+		return nil, false, err
+	}
+	out := []contextFact{}
+	for _, f := range facts {
+		f = readFact(f)
+		quote := f.Quote
+		if len(quote) > maxContextQuoteBytes {
+			quote = quote[:maxContextQuoteBytes]
+			for !utf8.ValidString(quote) {
+				quote = quote[:len(quote)-1]
+			}
+		}
+		out = append(out, contextFact{ID: f.ID, Subject: f.Subject, Predicate: f.Predicate, Object: f.Object, ValidFrom: f.ValidFrom, ValidTo: f.ValidTo, Origin: f.Origin, Quote: quote, EvidenceID: f.EvidenceID, TurnID: f.EvidenceTurnID})
+	}
+	return out, truncated, nil
 }
 
 type memoryItem struct {
@@ -56,12 +101,15 @@ type memoryItem struct {
 
 func contextCmd(factory modelFactory) *cobra.Command {
 	var query, source string
-	var limit int
+	var limit, factLimit int
 	var semantic bool
 	options := learnedContextOptions{}
 	cmd := &cobra.Command{Use: "context", Short: "Read bounded memory context as protocol-1 JSON", SilenceUsage: true, SilenceErrors: true, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if err := options.validate(cmd, query, limit, semantic); err != nil {
 			return err
+		}
+		if factLimit < 0 || factLimit > store.MaxContextFacts || (factLimit > 0 && options.model != "") {
+			return fmt.Errorf("--facts must be 0–%d and cannot be combined with --learned-model", store.MaxContextFacts)
 		}
 		timeout := 2 * time.Second
 		if options.model != "" {
@@ -233,6 +281,11 @@ func contextCmd(factory modelFactory) *cobra.Command {
 				return err
 			}
 		}
+		if factLimit > 0 {
+			if out.Facts, out.FactsTruncated, err = contextFacts(cmd, db, words, factLimit); err != nil {
+				return err
+			}
+		}
 		out.Status = "ready"
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 	}}
@@ -240,6 +293,7 @@ func contextCmd(factory modelFactory) *cobra.Command {
 	cmd.Flags().StringVar(&source, "trace-db", "", "scope imported memories to this Trace source (defaults to current project when present)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "maximum memories (1-50)")
 	cmd.Flags().BoolVar(&semantic, "semantic", false, "rank by offline hashed-word similarity instead of keyword search")
+	cmd.Flags().IntVar(&factLimit, "facts", 0, "also include up to N current project claims matching the query (0–20; default off)")
 	cmd.Flags().StringVar(&options.model, "learned-model", "", "explicitly query this installed local Ollama model instead of offline retrieval")
 	cmd.Flags().StringVar(&options.endpoint, "learned-endpoint", "http://127.0.0.1:11434", "loopback Ollama origin for explicit learned context")
 	cmd.Flags().StringVar(&options.scope, "learned-scope", "", "exact memory scope for learned context")

@@ -624,3 +624,59 @@ func rulesBatch(ctx context.Context, db *sql.DB, limit int, at int64) (Extractio
 	}
 	return report, tx.Commit()
 }
+
+// MaxContextFacts bounds the claims a context lookup may include.
+const MaxContextFacts = 20
+
+// ContextFacts returns up to limit current, non-stale `project` claims whose
+// subject, object or quote contains one of the lowercase words (any claim
+// when words is empty), most recently recorded first. It never migrates or
+// writes; databases without claims return none.
+func ContextFacts(ctx context.Context, db queryer, words []string, limit int, now int64) ([]Fact, bool, error) {
+	if limit < 1 || limit > MaxContextFacts || now < 0 || len(words) > 16 {
+		return nil, false, fmt.Errorf("context facts limit must be 1–%d", MaxContextFacts)
+	}
+	schema, installed, err := readClaimSchema(ctx, db)
+	if err != nil || !installed {
+		return []Fact{}, false, err
+	}
+	where := "f.scope='project' AND f.valid_from<=@at AND f.recorded_at<=@known AND (f.retracted_at IS NULL OR f.retracted_at>@known)"
+	args := []any{sql.Named("at", now), sql.Named("known", now)}
+	matches := []string{}
+	for i, word := range words {
+		name := fmt.Sprintf("w%d", i)
+		match := "instr(lower(f.subject),@" + name + ")>0 OR instr(lower(f.object),@" + name + ")>0"
+		if schema.sources {
+			match += " OR instr(lower(COALESCE(s.quote,'')),@" + name + ")>0"
+		}
+		matches = append(matches, match)
+		args = append(args, sql.Named(name, strings.ToLower(word)))
+	}
+	if len(matches) > 0 {
+		where += " AND (" + strings.Join(matches, " OR ") + ")"
+	}
+	rows, err := db.QueryContext(ctx, claimSelect(schema, where)+" WHERE effective_to IS NULL OR effective_to>@at ORDER BY recorded_at DESC,id LIMIT 201", args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	facts, truncated, bytes := []Fact{}, false, 0
+	for rows.Next() {
+		row, err := scanClaim(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		if bytes += len(row.content.String); bytes > 8*1024*1024 {
+			return facts, true, nil
+		}
+		if row.evaluate(now); row.fact.EvidenceStale {
+			continue
+		}
+		if len(facts) == limit {
+			truncated = true
+			break
+		}
+		facts = append(facts, row.fact)
+	}
+	return facts, truncated, rows.Err()
+}

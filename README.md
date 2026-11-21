@@ -35,7 +35,7 @@ describe the checkout when indexed, with their index timestamp.
 - `trace-brain facts extract [--limit N] [--json]` (offline rule extraction)
 - `trace-brain facts extract --model EXACT_INSTALLED_MODEL [--endpoint LOCAL_ORIGIN]` (opt-in learned extraction)
 - `trace-brain facts assert|query|graph|evidence|retract|forget ...` (see Temporal claims)
-- `trace-brain context [--query words] [--limit 20]` (bounded, read-only protocol-1 JSON)
+- `trace-brain context [--query words] [--limit 20] [--facts N]` (bounded, read-only protocol-1 JSON)
 
 ## Build
 `go build ./...`
@@ -297,7 +297,11 @@ default to now) with `--subject`, `--predicate`, `--limit` (1–100),
 `--include-stale` and `--json`; `--history --subject S` lists every claim about S,
 including superseded values. The read-only MCP tool `brain_fact_history` returns
 the same timeline (at most 50 claims, 64 KiB), and `brain_facts` results now
-include origin, quote and supersession.
+include origin, quote and supersession. `context --facts N` (0–20, default off)
+adds up to N current, non-stale `project` claims whose subject, object or quote
+contains a query word, with quotes capped at 256 bytes and `facts_truncated`
+reported; without the flag the context output is unchanged, and it cannot be
+combined with `--learned-model`.
 
 `facts extract --model EXACT_INSTALLED_MODEL [--endpoint http://127.0.0.1:11434]
 [--limit 1–100]` adds opt-in learned extraction with the same local Ollama policy

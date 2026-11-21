@@ -258,3 +258,45 @@ func TestLearnedExtractionIsExplicitGroundedAndHoldsNoTransaction(t *testing.T) 
 		}
 	}
 }
+
+func TestCompanionContextFactsAreOptInBoundedAndCurrent(t *testing.T) {
+	dir := t.TempDir()
+	path, source := filepath.Join(dir, "memory.db"), filepath.Join(dir, "trace.db")
+	traceHistory(t, source)
+	runBrain(t, path, "refresh", "--trace-db", source)
+	var plain map[string]json.RawMessage
+	if err := json.Unmarshal(runBrain(t, path, "context", "--trace-db", source, "--query", "storage"), &plain); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := plain["facts"]; ok || string(plain["status"]) != `"ready"` {
+		t.Fatalf("default context output changed: %s", plain)
+	}
+	var withFacts memoryContext
+	if err := json.Unmarshal(runBrain(t, path, "context", "--trace-db", source, "--query", "storage", "--facts", "5"), &withFacts); err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, f := range withFacts.Facts {
+		found[f.Subject+" "+f.Predicate+" "+f.Object] = true
+		related := strings.Contains(f.Subject+f.Object+strings.ToLower(f.Quote), "storage")
+		if !related || len(f.Quote) > maxContextQuoteBytes || f.EvidenceID == "" || f.ValidTo != nil {
+			t.Fatalf("unbounded, unrelated or closed context fact: %+v", f)
+		}
+	}
+	if !found["storage uses postgres"] || found["storage uses sqlite"] || len(withFacts.Facts) > 5 {
+		t.Fatalf("context facts are not the current claims: %v", found)
+	}
+	var one memoryContext
+	if err := json.Unmarshal(runBrain(t, path, "context", "--trace-db", source, "--query", "storage", "--facts", "1"), &one); err != nil || len(one.Facts) != 1 || !one.FactsTruncated {
+		t.Fatalf("context facts limit: %+v %v", one, err)
+	}
+	for _, args := range [][]string{{"context", "--facts", "21"}, {"context", "--facts", "2", "--learned-model", "m:1", "--query", "x"}} {
+		cmd := newRoot()
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs(append([]string{"--db", path}, args...))
+		if err := cmd.Execute(); err == nil {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+}
