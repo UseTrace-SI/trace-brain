@@ -175,7 +175,7 @@ func TestBoundImportedContentRedactsOnlyBoundedWindowsOfHugeTurns(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
+	if elapsed := time.Since(start); elapsed > 10*time.Second*raceSlowdown {
 		t.Fatalf("bounding a 20 MiB turn took %s", elapsed)
 	}
 	if len(got) > maxMemoryContentBytes || !strings.HasPrefix(got, "PROMPT-HEAD") || !strings.HasSuffix(got, "FINAL-OUTCOME") || strings.Contains(got, "7dF2aQ9mR4xT8vL1pN6cY3zB5kH0sW2u") {
