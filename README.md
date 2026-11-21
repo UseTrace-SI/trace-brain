@@ -232,9 +232,10 @@ benchmarks are still pending.
 ## Automatic fact extraction and invalidation
 
 After the import commits, `setup` and `refresh` run a deterministic, offline,
-rule-based extractor. It reads Trace turn memories (the prompt plus recorded
-responses and outputs; `Thinking:` blocks are skipped) and manual, MCP and
-agent-extract memories. Documents and session headers are not extracted, and
+rule-based extractor. It reads Trace turn memories (the prompt, plus reasoning
+paragraphs that start with `Assistant response:` or `Agent output:`; unlabelled
+and `Thinking:` reasoning is skipped, which also drops later paragraphs of a
+multi-paragraph response) and manual, MCP and agent-extract memories. Documents and session headers are not extracted, and
 extraction never writes a memory, so manual notes are unchanged. The rules
 recognize only explicit statements:
 
@@ -247,11 +248,12 @@ recognize only explicit statements:
 - structure and references: "Sym is defined in path", "moved Sym to path", and file
   paths or backticked symbols mentioned in a turn (`referenced_in turn:ID`).
 
-Questions, hedged or conditional sentences ("maybe", "if", "could", "should we",
-"for example"), negated statements and narrative past-tense policies are skipped.
-Tool and role names are lowercased; paths and symbols keep their case. A memory
-yields at most 16 claims (8 references), and for an exclusive subject/predicate
-only its last statement counts.
+Questions, hedged or conditional sentences ("maybe", "if", "when", "could",
+"should we", "for example"), negated statements and narrative past-tense policies
+are skipped. Tool and role names are lowercased; paths and symbols keep their case.
+A memory yields at most 16 claims (8 references). Within one memory only the last
+statement counts for an exclusive subject/predicate and for a negation pair about
+the same value ("npm install x … npm uninstall x" keeps only the removal).
 
 Every claim links to its evidence memory, its source session/turn and the exact
 redacted sentence it came from (a quote of at most 512 bytes that must occur

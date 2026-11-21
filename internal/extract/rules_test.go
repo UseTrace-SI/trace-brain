@@ -42,6 +42,10 @@ func TestRulesExtractExplicitStatements(t *testing.T) {
 		{"defined in", "AssertFact is defined in internal/store/facts.go.", []string{"AssertFact|defined_in|internal/store/facts.go|true"}},
 		{"moved symbol", "Moved `importTrace` from cli.go to internal/cli/import.go.", []string{"importTrace|defined_in|internal/cli/import.go|true"}},
 		{"last exclusive value in a memory wins", "Use Jest for tests. Use Vitest for tests.", []string{"tests|uses|vitest|true"}},
+		{"later removal in a memory wins", "Run npm install lodash.\nThat broke the build, so npm uninstall lodash.", []string{"project|dropped_dependency|lodash|false"}},
+		{"later stop in a memory wins", "We use Redis for caching.\nUpdate: we no longer use Redis for caching.", []string{"caching|stopped_using|redis|false"}},
+		{"switching back in a memory keeps the final value", "We switched from MySQL to Postgres for storage.\nThat failed, so we switched from Postgres to MySQL for storage.",
+			[]string{"postgres|replaces|mysql|false", "storage|uses|mysql|true", "storage|stopped_using|postgres|false", "mysql|replaces|postgres|false"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := Rules(Input{Text: tc.text})
@@ -75,6 +79,8 @@ func TestRulesSkipHedgedQuestionedNegatedAndConversationalText(t *testing.T) {
 		"See https://example.com/docs/setup.md for details.",
 		"The bug is in handler.go",
 		"We are considering whether to adopt Bazel for builds.",
+		"We use Redis for caching if the load is high.",
+		"Use Postgres for storage when we deploy to production.",
 	} {
 		if got := Rules(Input{Text: text}); len(got) != 0 {
 			t.Errorf("%q produced %v", text, triples(got))
@@ -88,6 +94,12 @@ func TestRulesHandleTurnLayoutReferencesAndBudgets(t *testing.T) {
 	want := []string{"tests|uses|vitest|true", "internal/extract/rules.go|referenced_in|turn:t1|false", "Rules|referenced_in|turn:t1|false", "README.md|referenced_in|turn:t1|false"}
 	if strings.Join(triples(got), "\n") != strings.Join(want, "\n") {
 		t.Fatalf("got\n%s\nwant\n%s", strings.Join(triples(got), "\n"), strings.Join(want, "\n"))
+	}
+	// Claude Code and Antigravity thinking is stored unlabelled and joined to
+	// responses with blank lines; only labelled response paragraphs count.
+	unlabelled := "Turn t2 (session s1, seq 5): Ship it | reasoning: The user might want Redis. We use Redis for caching.\n\nAssistant response: Done.\n\nAlways run the migrations in production first.\n\nAgent output: We use Ruff for linting."
+	if got := Rules(Input{Text: unlabelled, TurnFormat: true}); strings.Join(triples(got), ",") != "linting|uses|ruff|true" {
+		t.Fatalf("unlabelled reasoning was extracted: %v", triples(got))
 	}
 	if got := Rules(Input{Text: "Turn t1 (session s1, seq 4): update session.go", TurnFormat: true}); len(got) != 0 {
 		t.Fatalf("reference claims without a reference: %v", triples(got))

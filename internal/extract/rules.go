@@ -134,23 +134,38 @@ func Rules(in Input) []Claim {
 	return append(claims, references...)
 }
 
-// Dedupe drops repeated triples and keeps only the last value of each
-// exclusive subject/predicate pair.
+// Dedupe drops repeated triples and keeps, within one memory, only the last
+// statement of each exclusive subject/predicate pair and of each negation pair
+// about the same subject and value, so "npm install x … npm uninstall x" or
+// "we use X … we no longer use X" yield only the later statement.
 func Dedupe(claims []Claim) []Claim {
-	lastExclusive := map[string]int{}
-	for i, c := range claims {
+	groups := func(c Claim) []string {
+		keys := []string{}
 		if c.Exclusive {
-			lastExclusive[c.Subject+"\x00"+c.Predicate] = i
+			keys = append(keys, "exclusive\x00"+c.Subject+"\x00"+c.Predicate)
+		}
+		if negation := Negation(c.Predicate); negation != "" {
+			pair := []string{c.Predicate, negation}
+			sort.Strings(pair)
+			keys = append(keys, "negation\x00"+c.Subject+"\x00"+c.Object+"\x00"+pair[0])
+		}
+		return keys
+	}
+	last := map[string]int{}
+	for i, c := range claims {
+		for _, key := range groups(c) {
+			last[key] = i
 		}
 	}
 	seen := map[string]bool{}
 	out := []Claim{}
 	for i, c := range claims {
-		if c.Exclusive && lastExclusive[c.Subject+"\x00"+c.Predicate] != i {
-			continue
+		superseded := false
+		for _, key := range groups(c) {
+			superseded = superseded || last[key] != i
 		}
 		key := c.Subject + "\x00" + c.Predicate + "\x00" + c.Object
-		if seen[key] {
+		if superseded || seen[key] {
 			continue
 		}
 		seen[key] = true
@@ -160,7 +175,12 @@ func Dedupe(claims []Claim) []Claim {
 }
 
 var turnPrefix = regexp.MustCompile(`^Turn [^\s()]+ \(session [^\s()]+, seq -?\d+\): `)
-var reasoningLabel = regexp.MustCompile(`(?:^|\n\n)(Assistant response|Thinking|Agent output): `)
+
+// responseLabels mark recorded responses and outputs in Trace turn reasoning.
+// Trace stores some agents' private thinking unlabelled and others' under a
+// "Thinking: " label, and joins every note with a blank line, so only a
+// paragraph that starts with one of these labels is treated as a statement.
+var responseLabels = []string{"Assistant response: ", "Agent output: "}
 
 // sentences returns trimmed sentences; each is an exact substring of text.
 func sentences(text string, turnFormat bool) []string {
@@ -205,22 +225,11 @@ func turnBlocks(text string) []string {
 	if !found {
 		return blocks
 	}
-	labels := reasoningLabel.FindAllStringSubmatchIndex(reasoning, -1)
-	if len(labels) == 0 {
-		return append(blocks, reasoning)
-	}
-	if labels[0][0] > 0 {
-		blocks = append(blocks, reasoning[:labels[0][0]])
-	}
-	for i, label := range labels {
-		end := len(reasoning)
-		if i+1 < len(labels) {
-			end = labels[i+1][0]
-		}
-		// Private reasoning is hypothetical by nature; only recorded responses
-		// and outputs can state a decision.
-		if reasoning[label[2]:label[3]] != "Thinking" {
-			blocks = append(blocks, reasoning[label[1]:end])
+	for _, paragraph := range strings.Split(reasoning, "\n\n") {
+		for _, label := range responseLabels {
+			if strings.HasPrefix(paragraph, label) {
+				blocks = append(blocks, paragraph[len(label):])
+			}
 		}
 	}
 	return blocks
@@ -239,8 +248,8 @@ func cleanSentence(s string) string {
 
 // Hedges anywhere in a sentence, and conditionals/modals before the matched
 // statement, mark it as hypothetical rather than a recorded decision.
-var anywhereHedges = regexp.MustCompile(`(?i)\b(?:maybe|perhaps|whether|wonder|unsure|not sure|consider|considering|propose|proposing|suggest|suggesting|should we|shall we|do we|can we|plan to|planning to|want to|wants to|thinking about|hypothetically|for example|e\.g)\b`)
-var prefixHedges = regexp.MustCompile(`(?i)\b(?:if|unless|when|could|would|might|may|should|try|trying)\b`)
+var anywhereHedges = regexp.MustCompile(`(?i)\b(?:maybe|perhaps|whether|wonder|unsure|not sure|consider|considering|propose|proposing|suggest|suggesting|should we|shall we|do we|can we|plan to|planning to|want to|wants to|thinking about|hypothetically|for example|e\.g|if|unless|when|whenever|in case|provided that)\b`)
+var prefixHedges = regexp.MustCompile(`(?i)\b(?:could|would|might|may|should|try|trying)\b`)
 var negated = regexp.MustCompile(`(?i)(?:\bnot|n't|\bnever|\bno)\s+(?:\w+\s+)?$`)
 
 func hedged(s string, offset int) bool {
