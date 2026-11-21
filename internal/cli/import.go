@@ -63,7 +63,13 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 				return false, err
 			}
 		}
-		content, err = store.RedactImportedContent(content)
+		if extract {
+			content, err = store.RedactImportedContent(content)
+		} else {
+			// One oversized or malformed history entry must not block every
+			// later import; bound it explicitly instead of rejecting it.
+			content, err = store.BoundImportedContent(content)
+		}
 		if err != nil {
 			return false, err
 		}

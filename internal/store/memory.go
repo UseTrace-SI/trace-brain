@@ -51,6 +51,88 @@ func RedactImportedContent(content string) (string, error) {
 	return content, nil
 }
 
+// importOmissionReserve bounds the omission notice inserted by
+// BoundImportedContent; the notice itself is always shorter.
+const importOmissionReserve = 128
+
+// BoundImportedContent prepares Trace history text for a derived memory. Trace
+// appends every assistant response, thought and output to a turn without a
+// size limit, so rejecting an oversized turn (or one with invalid UTF-8) would
+// fail every later import of the same history. Instead the complete text is
+// redacted first, so a cut can never split a secret into an unrecognised
+// fragment, and an oversized result keeps its beginning (the prompt) and its
+// end (the latest outcome) around an explicit omission notice. Cuts never fall
+// inside a redaction marker or a UTF-8 sequence, and the stored text remains a
+// redaction fixed point.
+func BoundImportedContent(content string) (string, error) {
+	content = strings.ToValidUTF8(content, "�")
+	if strings.TrimSpace(content) == "" {
+		return "", fmt.Errorf("imported memory must not be empty")
+	}
+	r := redact.Redactor{}
+	redacted := r.Text(content)
+	if len(redacted) <= maxMemoryContentBytes {
+		return redacted, nil
+	}
+	budget := maxMemoryContentBytes
+	for attempt := 0; attempt < 4 && budget > importOmissionReserve; attempt++ {
+		bounded := r.Text(omitMiddle(redacted, budget))
+		if len(bounded) <= maxMemoryContentBytes {
+			return bounded, nil
+		}
+		budget -= len(bounded) - maxMemoryContentBytes + importOmissionReserve
+	}
+	return "", fmt.Errorf("imported memory could not be bounded to the 64 KiB content budget")
+}
+
+// omitMiddle keeps about three quarters of budget from the start of text and
+// the rest from its end, joined by a notice naming the omitted byte count.
+func omitMiddle(text string, budget int) string {
+	available := budget - importOmissionReserve
+	head := cutBefore(text, available*3/4)
+	tail := cutAfter(text, len(text)-(available-available*3/4))
+	if tail < head {
+		tail = head
+	}
+	return text[:head] + fmt.Sprintf("\n[trace-brain: %d bytes omitted to fit the 64 KiB memory budget]\n", tail-head) + text[tail:]
+}
+
+const redactionMarkerOpen, redactionMarkerClose = "⟨redacted:", "⟩"
+
+// cutBefore returns an end offset at or before n that is a rune boundary and
+// not inside a redaction marker.
+func cutBefore(text string, n int) int {
+	if n >= len(text) {
+		return len(text)
+	}
+	for n > 0 && !utf8.RuneStart(text[n]) {
+		n--
+	}
+	window := max(0, n-64)
+	if open := strings.LastIndex(text[window:n], redactionMarkerOpen); open >= 0 && !strings.Contains(text[window+open:n], redactionMarkerClose) {
+		n = window + open
+	}
+	return n
+}
+
+// cutAfter returns a start offset at or after n that is a rune boundary and
+// not inside a redaction marker.
+func cutAfter(text string, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	for n < len(text) && !utf8.RuneStart(text[n]) {
+		n++
+	}
+	window := max(0, n-64)
+	if open := strings.LastIndex(text[window:n], redactionMarkerOpen); open >= 0 && !strings.Contains(text[window+open:n], redactionMarkerClose) {
+		if end := strings.Index(text[n:], redactionMarkerClose); end >= 0 {
+			n += end + len(redactionMarkerClose)
+		}
+	}
+	return n
+}
+
 // NewMemoryID allocates a collision-resistant memory ID from crypto/rand,
 // checking the database and retrying so an existing ID is never reused. Time
 // stamps alone can collide within one nanosecond across concurrent writers.

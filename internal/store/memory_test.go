@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/UseTrace-SI/trace-brain/internal/redact"
 )
@@ -105,5 +106,59 @@ func TestRegressionRememberRejectsOversizeAfterRedaction(t *testing.T) {
 	var n int
 	if err := db.QueryRow("SELECT count(*) FROM memories").Scan(&n); err != nil || n != 0 {
 		t.Fatalf("oversized memory persisted: %d %v", n, err)
+	}
+}
+
+// Oversized or malformed Trace history used to be rejected, which failed the
+// whole import and every later refresh of that history. It must instead be
+// bounded explicitly: redaction runs before any cut, the prompt (head) and the
+// latest outcome (tail) survive, and no cut splits UTF-8 or a redaction marker.
+func TestRegressionBoundImportedContentKeepsHeadTailAndRedactsBeforeCutting(t *testing.T) {
+	r := redact.Redactor{}
+	token := "ghp_" + strings.Repeat("Zx9", 12)
+	nearCut := strings.Repeat("é", 24000) + " " + token + " " + strings.Repeat("ü", 30000) + " FINAL-OUTCOME"
+	markers := strings.Repeat(token+" ", 3000) + "END"
+	for _, tc := range []struct {
+		name, input    string
+		wantBounded    bool
+		mustContain    []string
+		mustNotContain []string
+	}{
+		{"small text is only redacted", "Turn t: deploy with " + token, false, []string{"Turn t: deploy with ⟨redacted:github-token:"}, []string{token}},
+		{"invalid UTF-8 is normalized", "bad \xff\xfe bytes", false, []string{"bad \uFFFD bytes"}, nil},
+		{"secret near the cut is redacted before cutting", "PROMPT-HEAD " + nearCut, true, []string{"PROMPT-HEAD", "FINAL-OUTCOME", "bytes omitted to fit the 64 KiB memory budget"}, []string{token, "ghp_Zx9"}},
+		{"markers are never split", markers, true, []string{"END"}, []string{"ghp_"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := BoundImportedContent(tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) > maxMemoryContentBytes || !utf8.ValidString(got) {
+				t.Fatalf("unbounded or invalid result: %d bytes, valid=%v", len(got), utf8.ValidString(got))
+			}
+			if bounded := strings.Contains(got, "bytes omitted"); bounded != tc.wantBounded {
+				t.Fatalf("omission notice present=%v, want %v", bounded, tc.wantBounded)
+			}
+			for _, want := range tc.mustContain {
+				if !strings.Contains(got, want) {
+					t.Fatalf("missing %q", want)
+				}
+			}
+			for _, unwanted := range tc.mustNotContain {
+				if strings.Contains(got, unwanted) {
+					t.Fatalf("leaked %q", unwanted)
+				}
+			}
+			if r.Text(got) != got {
+				t.Fatal("bounded text is not a redaction fixed point")
+			}
+			for _, fragment := range regexp.MustCompile(`⟨[^⟩]*$|^[^⟨]*⟩`).FindAllString(strings.ReplaceAll(got, "\n[trace-brain:", "⟦"), -1) {
+				t.Fatalf("split redaction marker: %q", fragment)
+			}
+		})
+	}
+	if _, err := BoundImportedContent(" \n\t"); err == nil {
+		t.Fatal("accepted empty imported text")
 	}
 }
