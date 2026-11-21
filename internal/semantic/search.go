@@ -91,7 +91,7 @@ func validDigest(digest string) bool {
 // redactAlgorithmVersion identifies the redaction algorithm used when deriving
 // embedding fingerprints. Bump it whenever redaction output can change so that
 // vectors embedded under the old rules are detected as stale.
-const redactAlgorithmVersion = "redact-v1"
+const redactAlgorithmVersion = "redact-v2"
 
 // contentHash binds an embedding to the exact redacted text sent to the model
 // plus the redaction algorithm version. The version makes the fingerprint

@@ -14,7 +14,7 @@ var patterns = []struct {
 	kind string
 	rx   *regexp.Regexp
 }{
-	{"private-key", regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----`)},
+	{"private-key", regexp.MustCompile(`(?s)(-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY BLOCK-----.*?-----END PGP PRIVATE KEY BLOCK-----)`)},
 	{"aws-key", regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`)},
 	{"aws-secret", regexp.MustCompile(`(?i)\b(?:aws[ _-]*)?secret[ _-]*(?:access[ _-]*)?key[^\S\n]*[:=][^\S\n]*["']?[A-Za-z0-9/+=]{40}`)},
 	{"google-api-key", regexp.MustCompile(`\bAIza[A-Za-z0-9_-]{35}\b`)},
@@ -26,12 +26,16 @@ var patterns = []struct {
 	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)},
 	{"api-key", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`)},
 	{"url-password", regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s:/@]+:[^\s@/]+@`)},
+	// HTTP credentials rarely carry a recognizable prefix or a key-context
+	// word, so an opaque bearer token in a pasted curl command used to pass.
+	{"authorization", regexp.MustCompile(`(?i)\bauthorization["']?\s*[:=]\s*["']?(?:bearer|basic|token|bot)\s+[A-Za-z0-9._~+/=-]{8,}`)},
+	{"bearer-token", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/-]{20,}=*`)},
 }
 
 // Necessary literal fragments cheaply rule out patterns before invoking the
 // regexp engine on large transcripts. A fragment alone never causes redaction.
 var patternHints = map[string][]string{
-	"private-key":       {"PRIVATE KEY-----"},
+	"private-key":       {"PRIVATE KEY-----", "PGP PRIVATE KEY BLOCK-----"},
 	"aws-key":           {"AKIA", "ASIA"},
 	"aws-secret":        {"SECRET", "secret"},
 	"google-api-key":    {"AIza"},
@@ -43,9 +47,13 @@ var patternHints = map[string][]string{
 	"jwt":               {"eyJ"},
 	"api-key":           {"sk-"},
 	"url-password":      {"://"},
+	"authorization":     {"uthorization", "UTHORIZATION"},
+	"bearer-token":      {"earer", "EARER"},
 }
 
-var envValue = regexp.MustCompile(`(?im)\b[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_]*\s*[:=]\s*(["']?[^\s,"']+["']?)`)
+// The optional quote after the name also covers quoted JSON/YAML keys such as
+// "db_password": "value", which previously escaped redaction entirely.
+var envValue = regexp.MustCompile(`(?im)\b[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_]*["']?\s*[:=]\s*(["']?[^\s,"']+["']?)`)
 var redactionMarker = regexp.MustCompile(`⟨redacted:[a-z-]+:[0-9a-f]{8}⟩`)
 var email = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`)
 var phone = regexp.MustCompile(`\b\+?[0-9][0-9 ()-]{8,}[0-9]\b`)
@@ -149,7 +157,9 @@ func redactEnvValues(s string) string {
 			continue
 		}
 		unquoted := strings.Trim(strings.TrimSpace(value[i+1:]), `"'`)
-		if location := redactionMarker.FindStringIndex(unquoted); location != nil && location[0] == 0 && location[1] == len(unquoted) {
+		// An already-redacted value may be followed by closing punctuation,
+		// e.g. a quoted JSON value: keep a second pass a fixed point.
+		if location := redactionMarker.FindStringIndex(unquoted); location != nil && location[0] == 0 && strings.Trim(unquoted[location[1]:], "}])>;") == "" {
 			continue
 		}
 		out.WriteString(s[last:match[0]])
