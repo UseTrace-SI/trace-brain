@@ -3,6 +3,7 @@ package semantic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"unicode/utf8"
@@ -28,8 +29,12 @@ const (
 	// generateContextTokens fixes the model context so a prompt within
 	// MaxGeneratePromptBytes is not silently truncated by a small default.
 	generateContextTokens = 8192
-	generatePredictTokens = 1024
+	generatePredictTokens = 2048
 )
+
+// ErrCompletionTruncated reports a completion cut off at its token limit. It
+// concerns one input, unlike transport or identity failures.
+var ErrCompletionTruncated = errors.New("model completion reached its token limit")
 
 // Generate runs one deterministic, non-streaming completion whose output is
 // constrained by the JSON schema format. The model identity and completion
@@ -58,8 +63,14 @@ func (o *Ollama) Generate(ctx context.Context, model, prompt string, format json
 	if err := o.request(ctx, http.MethodPost, "/api/generate", body, &out); err != nil {
 		return "", err
 	}
-	if out.Model != model || !out.Done || (out.DoneReason != "" && out.DoneReason != "stop") {
+	if out.Model != model || !out.Done {
 		return "", fmt.Errorf("model identity or completion state mismatch")
+	}
+	if out.DoneReason == "length" {
+		return "", ErrCompletionTruncated
+	}
+	if out.DoneReason != "" && out.DoneReason != "stop" {
+		return "", fmt.Errorf("model completion ended unexpectedly")
 	}
 	if len(out.Response) > MaxGenerateResponseBytes || !utf8.ValidString(out.Response) {
 		return "", fmt.Errorf("model completion exceeds %d bytes or is invalid UTF-8", MaxGenerateResponseBytes)

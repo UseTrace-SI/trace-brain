@@ -167,6 +167,7 @@ type fakeGenerator struct {
 	origin  string
 	digests []string
 	output  func(prompt string) string
+	failure func(prompt string) error
 	during  func()
 	prompts []string
 }
@@ -185,7 +186,38 @@ func (g *fakeGenerator) Generate(_ context.Context, _ string, prompt string, _ j
 	if g.during != nil {
 		g.during()
 	}
+	if g.failure != nil {
+		if err := g.failure(prompt); err != nil {
+			return "", err
+		}
+	}
 	return g.output(prompt), nil
+}
+
+func TestLearnedExtractionSkipsTruncatedCompletionsWithoutStopping(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	runBrain(t, path, "remember", "We use Bazel for builds.")
+	runBrain(t, path, "remember", "We use Ruff for linting.")
+	original := generatorFactory
+	defer func() { generatorFactory = original }()
+	fake := &fakeGenerator{origin: "http://127.0.0.1:11434", digests: []string{strings.Repeat("c", 64)}}
+	fake.failure = func(prompt string) error {
+		if strings.Contains(prompt, "Bazel") {
+			return semantic.ErrCompletionTruncated
+		}
+		return nil
+	}
+	fake.output = func(string) string {
+		return `{"claims":[{"subject":"linting","predicate":"uses","object":"ruff","quote":"We use Ruff for linting."}]}`
+	}
+	generatorFactory = func(string) (semantic.Generator, error) { return fake, nil }
+	var report learnedExtractionReport
+	if err := json.Unmarshal(runBrain(t, path, "facts", "extract", "--model", "m:1", "--json"), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.InvalidOutput != 1 || report.Facts.Added != 1 || report.Facts.Pending != 0 || len(fake.prompts) != 2 {
+		t.Fatalf("truncated completion handling: %+v (%d prompts)", report, len(fake.prompts))
+	}
 }
 
 func TestLearnedExtractionIsExplicitGroundedAndHoldsNoTransaction(t *testing.T) {

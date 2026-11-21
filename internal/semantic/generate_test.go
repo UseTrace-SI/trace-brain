@@ -3,6 +3,7 @@ package semantic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -29,10 +30,16 @@ func TestGenerateIsDeterministicSchemaBoundAndValidatesTheReply(t *testing.T) {
 	if seen["stream"] != false || seen["model"] != "m:1" || options["temperature"] != float64(0) || options["num_ctx"] == nil || seen["format"] == nil {
 		t.Fatalf("request was not deterministic and schema-bound: %+v", seen)
 	}
+	truncated := testOllama(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"model":"m:1","response":"{\"claims\":[","done":true,"done_reason":"length"}`))
+	}))
+	if _, err := truncated.Generate(context.Background(), "m:1", "extract", schema); !errors.Is(err, ErrCompletionTruncated) {
+		t.Fatalf("truncated completion not reported distinctly: %v", err)
+	}
 	for _, body := range []string{
 		`{"model":"other","response":"{}","done":true}`,
 		`{"model":"m:1","response":"{}","done":false}`,
-		`{"model":"m:1","response":"{}","done":true,"done_reason":"length"}`,
+		`{"model":"m:1","response":"{}","done":true,"done_reason":"unload"}`,
 		`{"model":"m:1","response":"` + strings.Repeat("x", MaxGenerateResponseBytes+1) + `","done":true}`,
 		`not json`,
 	} {

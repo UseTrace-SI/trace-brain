@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -316,13 +317,18 @@ func learnedExtraction(parent context.Context, model, endpoint string, limit int
 			continue
 		}
 		output, err := provider.Generate(ctx, model, extract.LearnedPrompt(memory.Content), extract.LearnedSchema)
-		if err != nil {
+		if err != nil && !errors.Is(err, semantic.ErrCompletionTruncated) {
 			return report, fmt.Errorf("learned extraction stopped: %w", err)
 		}
 		if current, err := provider.Digest(ctx, model); err != nil || current != digest {
 			return report, fmt.Errorf("model digest changed or became unavailable during extraction; rerun with a stable model")
 		}
+		// A completion cut off at its token limit is invalid output for this
+		// memory only; transport and identity failures stop the run above.
 		claims, rejected, parseErr := extract.ParseLearned(memory.Content, output)
+		if err != nil {
+			parseErr = err
+		}
 		err = commit(func(tx *sql.Tx) error {
 			if parseErr != nil {
 				report.InvalidOutput++
