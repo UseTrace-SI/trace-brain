@@ -59,17 +59,20 @@ type contextFact struct {
 	Origin     string `json:"origin"`
 	Quote      string `json:"quote,omitempty"`
 	EvidenceID string `json:"evidence_id"`
-	TurnID     string `json:"turn_id,omitempty"`
+	// EvidenceSource is the evidence memory's source (trace-import, manual,
+	// mcp, ...), so a consumer can keep local notes out of shared output.
+	EvidenceSource string `json:"evidence_source"`
+	TurnID         string `json:"turn_id,omitempty"`
 }
 
 const maxContextQuoteBytes = 256
 
-func contextFacts(cmd *cobra.Command, db *sql.DB, words []string, limit int) ([]contextFact, bool, error) {
+func contextFacts(cmd *cobra.Command, db *sql.DB, words []string, limit int, source string) ([]contextFact, bool, error) {
 	terms := make([]string, len(words))
 	for i, word := range words {
 		terms[i] = strings.Trim(word, `"`)
 	}
-	facts, truncated, err := store.ContextFacts(cmd.Context(), db, terms, limit, time.Now().UnixMilli())
+	facts, truncated, err := store.ContextFacts(cmd.Context(), db, terms, limit, time.Now().UnixMilli(), source)
 	if err != nil {
 		return nil, false, err
 	}
@@ -83,7 +86,7 @@ func contextFacts(cmd *cobra.Command, db *sql.DB, words []string, limit int) ([]
 				quote = quote[:len(quote)-1]
 			}
 		}
-		out = append(out, contextFact{ID: f.ID, Subject: f.Subject, Predicate: f.Predicate, Object: f.Object, ValidFrom: f.ValidFrom, ValidTo: f.ValidTo, Origin: f.Origin, Quote: quote, EvidenceID: f.EvidenceID, TurnID: f.EvidenceTurnID})
+		out = append(out, contextFact{ID: f.ID, Subject: f.Subject, Predicate: f.Predicate, Object: f.Object, ValidFrom: f.ValidFrom, ValidTo: f.ValidTo, Origin: f.Origin, Quote: quote, EvidenceID: f.EvidenceID, EvidenceSource: f.EvidenceSource, TurnID: f.EvidenceTurnID})
 	}
 	return out, truncated, nil
 }
@@ -283,7 +286,7 @@ func contextCmd(factory modelFactory) *cobra.Command {
 			}
 		}
 		if factLimit > 0 {
-			if out.Facts, out.FactsTruncated, err = contextFacts(cmd, db, words, factLimit); err != nil {
+			if out.Facts, out.FactsTruncated, err = contextFacts(cmd, db, words, factLimit, source); err != nil {
 				return err
 			}
 		}

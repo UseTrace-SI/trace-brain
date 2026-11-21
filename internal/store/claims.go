@@ -157,7 +157,7 @@ func claimSelect(schema claimSchema, where string) string {
 	}
 	inner := `SELECT f.id AS id,f.scope AS scope,f.subject AS subject,f.predicate AS predicate,f.object AS object,f.valid_from AS valid_from,
  f.valid_to AS valid_to,f.recorded_at AS recorded_at,f.retracted_at AS retracted_at,f.evidence_id AS evidence_id,f.evidence_hash AS evidence_hash,
- f.is_exclusive AS is_exclusive,` + content + ` AS content,` + captured + `,` + sources + `,COALESCE(m.session_id,'') AS session_id,
+ f.is_exclusive AS is_exclusive,` + content + ` AS content,` + captured + `,` + sources + `,COALESCE(m.source,'') AS evidence_source,COALESCE(m.session_id,'') AS session_id,
  COALESCE(m.turn_id,'') AS turn_id,` + closure + ` AS closed_at
  FROM facts f JOIN memories m ON m.id=f.evidence_id` + capturedJoin + sourceJoin + ` WHERE ` + where
 	return `SELECT * FROM (SELECT *,` + effectiveEndSQL("valid_to", "closed_at") + ` AS effective_to FROM (` + inner + `))`
@@ -180,7 +180,7 @@ func scanClaim(rows *sql.Rows) (claimRow, error) {
 	f := &row.fact
 	err := rows.Scan(&f.ID, &f.Scope, &f.Subject, &f.Predicate, &f.Object, &f.ValidFrom, &assertedEnd, &f.RecordedAt, &row.retracted, &f.EvidenceID,
 		&f.EvidenceHash, &f.Exclusive, &row.content, &row.captured, &row.capturedAt, &extractor, &version, &quote, &row.quoteFound,
-		&f.EvidenceSessionID, &f.EvidenceTurnID, &row.closedAt, &effectiveEnd)
+		&f.EvidenceSource, &f.EvidenceSessionID, &f.EvidenceTurnID, &row.closedAt, &effectiveEnd)
 	if err != nil {
 		return row, err
 	}
@@ -770,9 +770,11 @@ const MaxContextFacts = 20
 
 // ContextFacts returns up to limit current, non-stale `project` claims whose
 // subject, object or quote contains one of the lowercase words (any claim
-// when words is empty), most recently recorded first. It never migrates or
+// when words is empty), most recently recorded first. With sourceDB, like the
+// context memory list, only claims whose evidence is a manual or MCP note or
+// was imported from that Trace database are returned. It never migrates or
 // writes; databases without claims return none.
-func ContextFacts(ctx context.Context, db queryer, words []string, limit int, now int64) ([]Fact, bool, error) {
+func ContextFacts(ctx context.Context, db queryer, words []string, limit int, now int64, sourceDB string) ([]Fact, bool, error) {
 	if limit < 1 || limit > MaxContextFacts || now < 0 || len(words) > 16 {
 		return nil, false, fmt.Errorf("context facts limit must be 1–%d", MaxContextFacts)
 	}
@@ -794,6 +796,10 @@ func ContextFacts(ctx context.Context, db queryer, words []string, limit int, no
 	}
 	if len(matches) > 0 {
 		where += " AND (" + strings.Join(matches, " OR ") + ")"
+	}
+	if sourceDB != "" {
+		where += " AND (COALESCE(m.source,'') IN ('manual','mcp') OR EXISTS(SELECT 1 FROM memory_imports i WHERE i.memory_id=m.id AND i.source_db=@source))"
+		args = append(args, sql.Named("source", sourceDB))
 	}
 	rows, err := db.QueryContext(ctx, claimSelect(schema, where)+" WHERE effective_to IS NULL OR effective_to>@at ORDER BY recorded_at DESC,id LIMIT 201", args...)
 	if err != nil {

@@ -49,6 +49,10 @@ func (s *Server) facts(ctx context.Context, _ *mcp.CallToolRequest, input factQu
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	result, err := store.QueryFacts(ctx, s.DB, store.FactQuery{Scope: input.Scope, Subject: input.Subject, Predicate: input.Predicate, Object: input.Object, At: at, KnownAt: known, Limit: input.Limit, IncludeStale: input.IncludeStale, EvidenceMode: input.EvidenceMode})
+	for i := range result.Facts {
+		f := &result.Facts[i]
+		f.Subject, f.Object, f.Quote = redactText(f.Subject), redactText(f.Object), redactText(f.Quote)
+	}
 	return nil, factQueryOutput{Result: result, At: at, KnownAt: known, EvidenceCheck: store.FactEvidenceCheck(result.EvidenceMode)}, err
 }
 

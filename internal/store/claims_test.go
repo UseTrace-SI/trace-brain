@@ -322,7 +322,7 @@ func TestClaimReadsStayWithinDeadlineAtTheExtractionBudget(t *testing.T) {
 			t.Fatalf("query %q: %v", subject, err)
 		}
 	}
-	if _, _, err := ContextFacts(deadline, db, []string{"pkg"}, MaxContextFacts, 200000); err != nil {
+	if _, _, err := ContextFacts(deadline, db, []string{"pkg"}, MaxContextFacts, 200000, ""); err != nil {
 		t.Fatalf("context facts: %v", err)
 	}
 	if _, err := FactTimeline(deadline, db, TimelineQuery{Scope: "project", Subject: "storage", KnownAt: 200000, Limit: 100}); err != nil {

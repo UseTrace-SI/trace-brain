@@ -132,6 +132,9 @@ func factsCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		for i := range result.Facts {
+			result.Facts[i] = readFact(result.Facts[i])
+		}
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"result": result, "at": options.At, "known_at": options.KnownAt, "evidence_check": store.FactEvidenceCheck(options.EvidenceMode), "local_only": true})
 	}}
 	factQueryFlags(query, &queryTimes, 20)
@@ -159,6 +162,9 @@ func factsCmd() *cobra.Command {
 		result, err := traverseFacts(ctx, db, args[0], options, depth, direction)
 		if err != nil {
 			return err
+		}
+		for i := range result.Facts {
+			result.Facts[i] = readFact(result.Facts[i])
 		}
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"result": result, "at": options.At, "known_at": options.KnownAt, "scope": scope, "evidence_check": store.FactEvidenceCheck(options.EvidenceMode), "local_only": true})
 	}}

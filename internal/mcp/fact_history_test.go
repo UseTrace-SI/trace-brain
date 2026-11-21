@@ -92,3 +92,24 @@ func textOf(res *mcp.CallToolResult) string {
 	}
 	return b.String()
 }
+
+func TestRegressionBrainFactsReappliesRedactionOnRead(t *testing.T) {
+	db, err := store.Open(t.TempDir() + "/m.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	secret := runtimeCredential()
+	if _, err := db.Exec(`INSERT INTO memories(id,scope,content,source,created_at) VALUES('m','project','evidence','manual',1);
+INSERT INTO facts VALUES('fact-00000000000000000000000000000001','project','service','uses',?,1,NULL,1,NULL,'m','legacy',0)`, "key "+secret); err != nil {
+		t.Fatal(err)
+	}
+	_, out, err := New(db).facts(context.Background(), nil, factQueryInput{Subject: "service", IncludeStale: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(out)
+	if strings.Contains(string(encoded), secret) || !strings.Contains(string(encoded), "redacted:") {
+		t.Fatalf("brain_facts leaked unredacted claim text: %s", encoded)
+	}
+}

@@ -36,6 +36,7 @@ type Fact struct {
 	Extractor         string `json:"extractor,omitempty"`
 	ExtractorVersion  string `json:"extractor_version,omitempty"`
 	Quote             string `json:"quote,omitempty"`
+	EvidenceSource    string `json:"evidence_source,omitempty"`
 	EvidenceSessionID string `json:"evidence_session_id,omitempty"`
 	EvidenceTurnID    string `json:"evidence_turn_id,omitempty"`
 	// SupersededBy names the later claim whose start closes ValidTo.

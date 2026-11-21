@@ -74,9 +74,9 @@ IDs, treats quoted text as untrusted data and fingerprints the sampled evidence,
 so changed outcomes invalidate an earlier extraction. The extractor must not infer
 a successful test merely from an intention to run it. All imported, extracted,
 manual and MCP memory content passes through secret-pattern redaction before storage.
-Read paths (recall/query/brief, context, workspace retrieval, dash, viz, get and
-history) re-apply redaction to stored scope and content, so a legacy row cannot
-bypass the current policy.
+Read paths (recall/query/brief, context, workspace retrieval, dash, viz, get,
+history and every fact listing, query, graph and MCP fact tool) re-apply redaction
+to stored text, so a legacy row cannot bypass the current policy.
 
 Keyword retrieval ranks by SQLite FTS relevance with deterministic recency ties.
 The optional hashed-word ranker omits zero-overlap results; it remains a lexical
@@ -305,9 +305,11 @@ including superseded values. The read-only MCP tool `brain_fact_history` returns
 the same timeline (at most 50 claims, 64 KiB), and `brain_facts` results now
 include origin, quote and supersession. `context --facts N` (0–20, default off)
 adds up to N current, non-stale `project` claims whose subject, object or quote
-contains a query word, with quotes capped at 256 bytes and `facts_truncated`
-reported; without the flag the context output is unchanged, and it cannot be
-combined with `--learned-model`.
+contains a query word, with quotes capped at 256 bytes, the evidence memory's
+`evidence_source` and `facts_truncated` reported. Like the memory list, a Trace
+source limits them to claims backed by manual/MCP notes or by memories imported
+from that source. Without the flag the context output is unchanged, and it cannot
+be combined with `--learned-model`.
 
 `facts extract --model EXACT_INSTALLED_MODEL [--endpoint http://127.0.0.1:11434]
 [--limit 1–100]` adds opt-in learned extraction with the same local Ollama policy

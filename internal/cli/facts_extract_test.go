@@ -356,3 +356,58 @@ func TestExtractionAfterSlowImportIsDeferredAndReported(t *testing.T) {
 		t.Fatalf("extraction within the deadline: %+v", summary)
 	}
 }
+
+// context --facts ignored --trace-db, so claims derived from another Trace
+// source sharing the database were returned beside correctly scoped memories.
+func TestRegressionContextFactsFollowTheSelectedTraceSource(t *testing.T) {
+	dir := t.TempDir()
+	path, mine, other := filepath.Join(dir, "memory.db"), filepath.Join(dir, "trace.db"), filepath.Join(dir, "other.db")
+	traceHistory(t, mine)
+	src, err := sql.Open("sqlite", other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if _, err := src.Exec(`CREATE TABLE sessions(id TEXT,agent TEXT,worktree TEXT,started_at INTEGER);
+CREATE TABLE turns(id TEXT,session_id TEXT,seq INTEGER,prompt TEXT,reasoning TEXT,started_at INTEGER);
+INSERT INTO sessions VALUES('o','codex','other',1000);
+INSERT INTO turns VALUES('o1','o',1,'We use Oracle for billing storage.','',1000);`); err != nil {
+		t.Fatal(err)
+	}
+	runBrain(t, path, "refresh", "--trace-db", mine)
+	runBrain(t, path, "refresh", "--trace-db", other)
+	var got memoryContext
+	if err := json.Unmarshal(runBrain(t, path, "context", "--trace-db", mine, "--query", "storage", "--facts", "20"), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Facts) == 0 {
+		t.Fatal("no context facts for the selected source")
+	}
+	for _, f := range got.Facts {
+		if f.Object == "oracle" || f.Subject == "billing storage" || f.EvidenceSource != "trace-import" {
+			t.Fatalf("context fact crossed Trace sources or lacks provenance: %+v", f)
+		}
+	}
+}
+
+func TestRegressionFactReadPathsReapplyRedaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := runtimeCredential()
+	// Direct inserts emulate a legacy claim stored before current redaction.
+	if _, err := db.Exec(`INSERT INTO memories(id,scope,content,source,created_at) VALUES('m','project','evidence','manual',1);
+INSERT INTO facts VALUES('fact-00000000000000000000000000000001','project','service','uses',?,1,NULL,1,NULL,'m','legacy',0)`, "key "+secret); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"facts", "query", "--subject", "service", "--include-stale"}, {"facts", "graph", "service", "--include-stale"}, {"facts", "--subject", "service", "--include-stale", "--json"}} {
+		if got := string(runBrain(t, path, args...)); strings.Contains(got, secret) || !strings.Contains(got, "redacted:") {
+			t.Fatalf("%v leaked unredacted claim text: %s", args, got)
+		}
+	}
+}
