@@ -72,9 +72,21 @@ func contradictionSQL() string {
 // is independent of import order, exact for historical --known-at queries,
 // and follows retraction or deletion of the newer claim. Manual claims are
 // never closed automatically.
+//
+// Each kind of contradiction is a separate ordered probe on its own index, so
+// the cost per row is logarithmic rather than a scan of every claim about the
+// subject: a different value of the same predicate (any claim when f is
+// exclusive, otherwise only exclusive claims) and the negated predicate for
+// the same value.
 func closureSQL(known string) string {
-	return `(CASE WHEN s.fact_id IS NULL THEN NULL ELSE (SELECT min(y.valid_from) FROM facts y WHERE y.scope=f.scope AND y.subject=f.subject
- AND y.valid_from>f.valid_from AND y.recorded_at<=` + known + ` AND (y.retracted_at IS NULL OR y.retracted_at>` + known + `) AND ` + contradictionSQL() + `) END)`
+	probe := func(conditions string) string {
+		return "coalesce((SELECT y.valid_from FROM facts y WHERE " + conditions + " AND y.valid_from>f.valid_from AND y.recorded_at<=" + known +
+			" AND (y.retracted_at IS NULL OR y.retracted_at>" + known + ") ORDER BY y.valid_from LIMIT 1)," + sqlMaxInt + ")"
+	}
+	sameKey := "y.scope=f.scope AND y.subject=f.subject AND y.predicate=f.predicate AND y.object<>f.object"
+	negated := "y.scope=f.scope AND y.subject=f.subject AND y.predicate=" + negationSQL("f.predicate") + " AND y.object=f.object"
+	return "(CASE WHEN s.fact_id IS NULL THEN NULL ELSE nullif(min(CASE WHEN f.is_exclusive=1 THEN " + probe(sameKey) +
+		" ELSE " + probe(sameKey+" AND y.is_exclusive=1") + " END," + probe(negated) + ")," + sqlMaxInt + ") END)"
 }
 
 func effectiveEndSQL(validTo, closedAt string) string {
@@ -180,9 +192,13 @@ func attachSupersessions(ctx context.Context, db queryer, rows []claimRow, known
 		}
 		f := &rows[i].fact
 		var s Supersession
-		err := db.QueryRowContext(ctx, `SELECT y.id,y.evidence_id,y.valid_from,y.recorded_at FROM facts y JOIN facts f ON f.id=@id
- WHERE y.scope=f.scope AND y.subject=f.subject AND y.valid_from=@closed AND y.recorded_at<=@known AND (y.retracted_at IS NULL OR y.retracted_at>@known)
- AND `+contradictionSQL()+` ORDER BY y.predicate<>f.predicate,y.recorded_at,y.id LIMIT 1`, sql.Named("id", f.ID), sql.Named("closed", rows[i].closedAt.Int64), sql.Named("known", knownAt)).
+		visible := " AND y.valid_from=@closed AND y.recorded_at<=@known AND (y.retracted_at IS NULL OR y.retracted_at>@known)"
+		err := db.QueryRowContext(ctx, `SELECT id,evidence_id,valid_from,recorded_at FROM (
+ SELECT 0 AS preference,y.id,y.evidence_id,y.valid_from,y.recorded_at FROM facts f JOIN facts y ON y.scope=f.scope AND y.subject=f.subject AND y.predicate=f.predicate
+  WHERE f.id=@id AND y.object<>f.object AND (f.is_exclusive=1 OR y.is_exclusive=1)`+visible+`
+ UNION ALL
+ SELECT 1,y.id,y.evidence_id,y.valid_from,y.recorded_at FROM facts f JOIN facts y ON y.scope=f.scope AND y.subject=f.subject AND y.predicate=`+negationSQL("f.predicate")+` AND y.object=f.object
+  WHERE f.id=@id`+visible+`) ORDER BY preference,recorded_at,id LIMIT 1`, sql.Named("id", f.ID), sql.Named("closed", rows[i].closedAt.Int64), sql.Named("known", knownAt)).
 			Scan(&s.FactID, &s.EvidenceID, &s.At, &s.RecordedAt)
 		if err != nil && err != sql.ErrNoRows {
 			return err
@@ -358,6 +374,7 @@ type ExtractionReport struct {
 	Conflicts       int    `json:"conflicts_skipped"`
 	Suppressed      int    `json:"retracted_not_restored"`
 	Rejected        int    `json:"claims_rejected"`
+	Corroborated    int    `json:"claims_already_held"`
 	Changed         int    `json:"memories_changed_during_extraction"`
 	Skipped         int    `json:"memories_skipped"`
 	Pending         int    `json:"pending"`
@@ -373,6 +390,7 @@ func (r *ExtractionReport) Add(o ExtractionReport) {
 	r.Conflicts += o.Conflicts
 	r.Suppressed += o.Suppressed
 	r.Rejected += o.Rejected
+	r.Corroborated += o.Corroborated
 	r.Changed += o.Changed
 	r.Skipped += o.Skipped
 	r.BudgetExhausted = r.BudgetExhausted || o.BudgetExhausted
@@ -512,20 +530,21 @@ func ApplyExtraction(ctx context.Context, tx *sql.Tx, memory ExtractionMemory, e
 			report.BudgetExhausted = true
 			continue
 		}
-		var blocked int
-		// A new claim may close older extracted claims (derived at read time),
-		// but never a manual claim; at an identical instant neither closes.
-		err := tx.QueryRowContext(ctx, `SELECT count(*) FROM facts y LEFT JOIN fact_sources ys ON ys.fact_id=y.id
- WHERE y.scope=@scope AND y.subject=@subject AND y.retracted_at IS NULL AND y.recorded_at<=@at
- AND ((y.predicate=@predicate AND y.object<>@object AND (y.is_exclusive=1 OR @exclusive=1)) OR (y.object=@object AND y.predicate=@negation))
- AND ((ys.fact_id IS NULL AND y.valid_from<=@from AND (y.valid_to IS NULL OR y.valid_to>@from)) OR (ys.fact_id IS NOT NULL AND y.valid_from=@from))`,
-			sql.Named("scope", memory.Scope), sql.Named("subject", c.Subject), sql.Named("at", at), sql.Named("predicate", c.Predicate), sql.Named("object", c.Object),
-			sql.Named("exclusive", c.Exclusive), sql.Named("negation", extract.Negation(c.Predicate)), sql.Named("from", memory.ValidFrom)).Scan(&blocked)
+		blocked, err := claimBlocked(ctx, tx, memory.Scope, c.Claim, memory.ValidFrom, at)
 		if err != nil {
 			return report, err
 		}
-		if blocked > 0 {
+		if blocked {
 			report.Conflicts++
+			continue
+		}
+		covered, err := claimCovered(ctx, tx, memory.Scope, c.Claim, memory.ValidFrom, at)
+		if err != nil {
+			return report, err
+		}
+		if covered {
+			report.Corroborated++
+			accepted++
 			continue
 		}
 		id, err := newFactID()
@@ -551,6 +570,61 @@ func ApplyExtraction(ctx context.Context, tx *sql.Tx, memory ExtractionMemory, e
  ON CONFLICT(memory_id,extractor) DO UPDATE SET version=excluded.version,content_hash=excluded.content_hash,claims=excluded.claims,extracted_at=excluded.extracted_at`,
 		memory.ID, extractor, version, memory.ContentHash, accepted, at)
 	return report, err
+}
+
+// claimBlocked reports whether adding c from valid time from would require
+// closing an active manual claim, or contradicts another claim starting at the
+// identical instant. A new claim may close older extracted claims (derived at
+// read time) but never a manual one. Each probe uses its own index.
+func claimBlocked(ctx context.Context, tx *sql.Tx, scope string, c extract.Claim, from, at int64) (bool, error) {
+	overlapping := ` AND y.valid_from<=@from AND y.retracted_at IS NULL AND y.recorded_at<=@at
+ AND ((ys.fact_id IS NULL AND (y.valid_to IS NULL OR y.valid_to>@from)) OR (ys.fact_id IS NOT NULL AND y.valid_from=@from))`
+	sameKey := "y.scope=@scope AND y.subject=@subject AND y.predicate=@predicate AND y.object<>@object"
+	if !c.Exclusive {
+		sameKey += " AND y.is_exclusive=1"
+	}
+	var blocked bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM facts y LEFT JOIN fact_sources ys ON ys.fact_id=y.id WHERE `+sameKey+overlapping+`)
+ OR EXISTS(SELECT 1 FROM facts y LEFT JOIN fact_sources ys ON ys.fact_id=y.id WHERE y.scope=@scope AND y.subject=@subject AND y.predicate=@negation AND y.object=@object`+overlapping+`)`,
+		sql.Named("scope", scope), sql.Named("subject", c.Subject), sql.Named("predicate", c.Predicate), sql.Named("object", c.Object),
+		sql.Named("negation", extract.Negation(c.Predicate)), sql.Named("from", from), sql.Named("at", at)).Scan(&blocked)
+	return blocked, err
+}
+
+// maxCoveringClaims bounds identical extracted claims that hold one value at
+// the same time. A value restated by further memories while already held by
+// this many active claims is not recorded again: it changes no validity, and
+// unbounded duplicates would make every closure probe skip them.
+const maxCoveringClaims = 3
+
+// claimCovered reports whether maxCoveringClaims extracted claims with the
+// same scope, subject, predicate and value are already valid at from. Older
+// identical claims are visited newest first and the scan stops at the first
+// one no longer valid, since earlier runs of the value were closed before it.
+func claimCovered(ctx context.Context, tx *sql.Tx, scope string, c extract.Claim, from, at int64) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT `+effectiveEndSQL("f.valid_to", closureSQL("@at"))+` FROM facts f JOIN fact_sources s ON s.fact_id=f.id
+ WHERE f.scope=@scope AND f.subject=@subject AND f.predicate=@predicate AND f.object=@object AND f.valid_from<=@from
+ AND f.retracted_at IS NULL AND f.recorded_at<=@at ORDER BY f.valid_from DESC LIMIT @limit`,
+		sql.Named("scope", scope), sql.Named("subject", c.Subject), sql.Named("predicate", c.Predicate), sql.Named("object", c.Object),
+		sql.Named("from", from), sql.Named("at", at), sql.Named("limit", 2*maxCoveringClaims))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	covering := 0
+	for rows.Next() {
+		var end sql.NullInt64
+		if err := rows.Scan(&end); err != nil {
+			return false, err
+		}
+		if end.Valid && end.Int64 <= from {
+			break
+		}
+		if covering++; covering == maxCoveringClaims {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // claimKey identifies an extracted claim of one memory across re-extraction:

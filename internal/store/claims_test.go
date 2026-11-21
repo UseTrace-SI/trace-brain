@@ -3,9 +3,11 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func claimsDB(t *testing.T) *sql.DB {
@@ -278,5 +280,76 @@ func TestRetractedClaimsAreNotRestoredAndScopeChangesReExtract(t *testing.T) {
 	}
 	if old := current(t, db, "linting", 3400, 3400); len(old) != 0 {
 		t.Fatalf("claim left in the old scope: %s", keys(old))
+	}
+}
+
+// Read-time invalidation used one correlated scan over every claim about the
+// subject per candidate row, so reads at a few thousand claims on one subject
+// (e.g. project-wide dependencies) exceeded the two-second fact deadline.
+func TestClaimReadsStayWithinDeadlineAtTheExtractionBudget(t *testing.T) {
+	ctx := context.Background()
+	db := claimsDB(t)
+	if err := Remember(ctx, db, "m", "project", "We use many packages.", "manual", 1); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < ExtractionFactLimit; i++ {
+		id := fmt.Sprintf("fact-%032x", i)
+		predicate, subject, object, exclusive := []string{"depends_on", "uses", "stopped_using"}[i%3], "project", fmt.Sprintf("pkg%d", i/3), false
+		if i%4 == 0 {
+			subject, object, exclusive = "storage", []string{"sqlite", "postgres"}[i/4%2], true
+			predicate = "uses"
+		}
+		if _, err := tx.Exec("INSERT INTO facts VALUES(?,?,?,?,?,?,NULL,?,NULL,?,?,?)", id, "project", subject, predicate, object, int64(10+i), 100000, "m", "h", exclusive); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec("INSERT INTO fact_sources VALUES(?,?,?,?)", id, "rules", "rules-v1", "We use many packages."); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	deadline, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	for _, subject := range []string{"project", "storage", ""} {
+		if _, err := QueryFacts(deadline, db, FactQuery{Scope: "project", Subject: subject, At: 200000, KnownAt: 200000, Limit: 100, IncludeStale: true}); err != nil {
+			t.Fatalf("query %q: %v", subject, err)
+		}
+	}
+	if _, _, err := ContextFacts(deadline, db, []string{"pkg"}, MaxContextFacts, 200000); err != nil {
+		t.Fatalf("context facts: %v", err)
+	}
+	if _, err := FactTimeline(deadline, db, TimelineQuery{Scope: "project", Subject: "storage", KnownAt: 200000, Limit: 100}); err != nil {
+		t.Fatalf("timeline: %v", err)
+	}
+}
+
+func TestRestatedValuesAreHeldByBoundedClaims(t *testing.T) {
+	ctx := context.Background()
+	db := claimsDB(t)
+	for i := 0; i < 8; i++ {
+		if err := Remember(ctx, db, fmt.Sprintf("m%d", i), "project", "Use SQLite for storage.", "manual", int64(100+i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Remember(ctx, db, "switch", "project", "Use Postgres for storage.", "manual", 200); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remember(ctx, db, "back", "project", "Use SQLite for storage.", "manual", 300); err != nil {
+		t.Fatal(err)
+	}
+	report := extractAll(t, db, 1000)
+	if report.Added != maxCoveringClaims+2 || report.Corroborated != 8-maxCoveringClaims {
+		t.Fatalf("restated value not bounded: %+v", report)
+	}
+	if got := current(t, db, "storage", 250, 1000); len(got) != 1 || got["uses:postgres"].ID == "" {
+		t.Fatalf("interval after the switch: %s", keys(got))
+	}
+	if got := current(t, db, "storage", 350, 1000); len(got) != 1 || got["uses:sqlite"].ValidFrom != 300 {
+		t.Fatalf("value restated after a change was not recorded: %+v", got)
 	}
 }

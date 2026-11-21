@@ -117,12 +117,16 @@ func AssertFact(ctx context.Context, db *sql.DB, input Fact, at int64) (Fact, er
 	// Overlapping contradictions are rejected, except older extracted claims:
 	// a newer manual assertion closes those (derived at read time) and the
 	// closed claims are reported. Manual claims are never closed automatically.
-	rows, err := tx.QueryContext(ctx, `SELECT f.id,f.valid_from,s.fact_id IS NOT NULL FROM facts f LEFT JOIN fact_sources s ON s.fact_id=f.id
- WHERE f.scope=@scope AND f.subject=@subject AND f.retracted_at IS NULL
- AND ((f.predicate=@predicate AND f.object<>@object AND (f.is_exclusive=1 OR @exclusive=1)) OR (s.fact_id IS NOT NULL AND f.object=@object AND f.predicate=@negation))
- AND f.valid_from<coalesce(@end,`+sqlMaxInt+`) AND coalesce(`+effectiveEndSQL("f.valid_to", closureSQL("@at"))+`,`+sqlMaxInt+`)>@from ORDER BY f.valid_from,f.id`,
+	sameKey := "f.scope=@scope AND f.subject=@subject AND f.predicate=@predicate AND f.object<>@object"
+	if !input.Exclusive {
+		sameKey += " AND f.is_exclusive=1"
+	}
+	overlapping := ` AND f.retracted_at IS NULL AND f.valid_from<coalesce(@end,` + sqlMaxInt + `) AND coalesce(` + effectiveEndSQL("f.valid_to", closureSQL("@at")) + `,` + sqlMaxInt + `)>@from`
+	rows, err := tx.QueryContext(ctx, `SELECT f.id,f.valid_from,s.fact_id IS NOT NULL FROM facts f LEFT JOIN fact_sources s ON s.fact_id=f.id WHERE `+sameKey+overlapping+`
+ UNION ALL SELECT f.id,f.valid_from,1 FROM facts f JOIN fact_sources s ON s.fact_id=f.id
+ WHERE f.scope=@scope AND f.subject=@subject AND f.predicate=@negation AND f.object=@object`+overlapping,
 		sql.Named("scope", input.Scope), sql.Named("subject", input.Subject), sql.Named("predicate", input.Predicate), sql.Named("object", input.Object),
-		sql.Named("exclusive", input.Exclusive), sql.Named("negation", extract.Negation(input.Predicate)), sql.Named("end", end), sql.Named("from", input.ValidFrom), sql.Named("at", at))
+		sql.Named("negation", extract.Negation(input.Predicate)), sql.Named("end", end), sql.Named("from", input.ValidFrom), sql.Named("at", at))
 	if err != nil {
 		return Fact{}, err
 	}

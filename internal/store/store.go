@@ -137,6 +137,8 @@ CREATE TRIGGER IF NOT EXISTS fact_evidence_usage_keep BEFORE DELETE ON fact_evid
  SELECT RAISE(ABORT,'fact_evidence_usage_required');
 END;
 CREATE INDEX IF NOT EXISTS facts_evidence ON facts(evidence_id);
+CREATE INDEX IF NOT EXISTS facts_exclusive ON facts(scope,subject,predicate,is_exclusive,valid_from);
+CREATE INDEX IF NOT EXISTS facts_value ON facts(scope,subject,predicate,object,valid_from);
 CREATE TABLE IF NOT EXISTS fact_sources (
  fact_id TEXT PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE,
  extractor TEXT NOT NULL CHECK(extractor IN ('rules','ollama')),
