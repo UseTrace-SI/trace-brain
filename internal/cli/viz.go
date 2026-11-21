@@ -30,7 +30,7 @@ func renderVisualization(ctx context.Context, db *sql.DB, path string) (bool, er
 		if err := rows.Scan(&m.ID, &m.Scope, &m.Content); err != nil {
 			return false, err
 		}
-		m.Content = (redact.Redactor{}).Text(m.Content)
+		m.Scope, m.Content = (redact.Redactor{}).Text(m.Scope), (redact.Redactor{}).Text(m.Content)
 		memories = append(memories, m)
 	}
 	if err := rows.Err(); err != nil {

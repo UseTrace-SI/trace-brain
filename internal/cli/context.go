@@ -13,19 +13,23 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
 	learned "github.com/UseTrace-SI/trace-brain/internal/semantic"
+	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/spf13/cobra"
 )
 
 func refreshCmd() *cobra.Command {
 	var source string
 	cmd := &cobra.Command{Use: "refresh", Short: "Import Trace history and return protocol-1 JSON", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		started := time.Now()
 		if err := importTrace(cmd.Context(), io.Discard, source, "", false); err != nil {
 			return err
 		}
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "status": "ready"})
+		// Extraction is bounded and reported; it never fails the import.
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "status": "ready", "facts": extractAfterImport(cmd.Context(), started)})
 	}}
 	cmd.Flags().StringVar(&source, "trace-db", ".trace/trace.db", "Trace history database (read-only)")
 	return cmd
@@ -39,6 +43,52 @@ type memoryContext struct {
 	Memories  []memoryItem        `json:"memories"`
 	Retrieval string              `json:"retrieval,omitempty"`
 	Learned   *learnedContextInfo `json:"learned,omitempty"`
+	// Facts and FactsTruncated appear only when --facts is requested.
+	Facts          []contextFact `json:"facts,omitempty"`
+	FactsTruncated bool          `json:"facts_truncated,omitempty"`
+}
+
+// contextFact is a compact current claim; quotes are capped for context.
+type contextFact struct {
+	ID         string `json:"id"`
+	Subject    string `json:"subject"`
+	Predicate  string `json:"predicate"`
+	Object     string `json:"object"`
+	ValidFrom  int64  `json:"valid_from"`
+	ValidTo    *int64 `json:"valid_to,omitempty"`
+	Origin     string `json:"origin"`
+	Quote      string `json:"quote,omitempty"`
+	EvidenceID string `json:"evidence_id"`
+	// EvidenceSource is the evidence memory's source (trace-import, manual,
+	// mcp, ...), so a consumer can keep local notes out of shared output.
+	EvidenceSource string `json:"evidence_source"`
+	TurnID         string `json:"turn_id,omitempty"`
+}
+
+const maxContextQuoteBytes = 256
+
+func contextFacts(cmd *cobra.Command, db *sql.DB, words []string, limit int, source string) ([]contextFact, bool, error) {
+	terms := make([]string, len(words))
+	for i, word := range words {
+		terms[i] = strings.Trim(word, `"`)
+	}
+	facts, truncated, err := store.ContextFacts(cmd.Context(), db, terms, limit, time.Now().UnixMilli(), source)
+	if err != nil {
+		return nil, false, err
+	}
+	out := []contextFact{}
+	for _, f := range facts {
+		f = readFact(f)
+		quote := f.Quote
+		if len(quote) > maxContextQuoteBytes {
+			quote = quote[:maxContextQuoteBytes]
+			for !utf8.ValidString(quote) {
+				quote = quote[:len(quote)-1]
+			}
+		}
+		out = append(out, contextFact{ID: f.ID, Subject: f.Subject, Predicate: f.Predicate, Object: f.Object, ValidFrom: f.ValidFrom, ValidTo: f.ValidTo, Origin: f.Origin, Quote: quote, EvidenceID: f.EvidenceID, EvidenceSource: f.EvidenceSource, TurnID: f.EvidenceTurnID})
+	}
+	return out, truncated, nil
 }
 
 type memoryItem struct {
@@ -55,12 +105,15 @@ type memoryItem struct {
 
 func contextCmd(factory modelFactory) *cobra.Command {
 	var query, source string
-	var limit int
+	var limit, factLimit int
 	var semantic bool
 	options := learnedContextOptions{}
 	cmd := &cobra.Command{Use: "context", Short: "Read bounded memory context as protocol-1 JSON", SilenceUsage: true, SilenceErrors: true, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if err := options.validate(cmd, query, limit, semantic); err != nil {
 			return err
+		}
+		if factLimit < 0 || factLimit > store.MaxContextFacts || (factLimit > 0 && options.model != "") {
+			return fmt.Errorf("--facts must be 0–%d and cannot be combined with --learned-model", store.MaxContextFacts)
 		}
 		timeout := 2 * time.Second
 		if options.model != "" {
@@ -190,7 +243,9 @@ func contextCmd(factory modelFactory) *cobra.Command {
 				limit = len(candidates)
 			}
 			for i := 0; i < limit; i++ {
-				out.Memories = append(out.Memories, candidates[i].item)
+				item := candidates[i].item
+				item.Scope, item.Content = readRedacted(item.Scope, item.Content)
+				out.Memories = append(out.Memories, item)
 			}
 		} else {
 			q := `SELECT m.id,m.scope,substr(m.content,1,2048),COALESCE(m.source,''),COALESCE(m.session_id,''),COALESCE(m.turn_id,''),m.created_at FROM memories m`
@@ -221,9 +276,17 @@ func contextCmd(factory modelFactory) *cobra.Command {
 				if err := rows.Scan(&item.ID, &item.Scope, &item.Content, &item.Source, &item.SessionID, &item.TurnID, &item.CreatedAt); err != nil {
 					return err
 				}
+				// Context output can be published by Trace; legacy or externally
+				// written rows must not bypass the read-time redaction policy.
+				item.Scope, item.Content = readRedacted(item.Scope, item.Content)
 				out.Memories = append(out.Memories, item)
 			}
 			if err := rows.Err(); err != nil {
+				return err
+			}
+		}
+		if factLimit > 0 {
+			if out.Facts, out.FactsTruncated, err = contextFacts(cmd, db, words, factLimit, source); err != nil {
 				return err
 			}
 		}
@@ -234,6 +297,7 @@ func contextCmd(factory modelFactory) *cobra.Command {
 	cmd.Flags().StringVar(&source, "trace-db", "", "scope imported memories to this Trace source (defaults to current project when present)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "maximum memories (1-50)")
 	cmd.Flags().BoolVar(&semantic, "semantic", false, "rank by offline hashed-word similarity instead of keyword search")
+	cmd.Flags().IntVar(&factLimit, "facts", 0, "also include up to N current project claims matching the query (0–20; default off)")
 	cmd.Flags().StringVar(&options.model, "learned-model", "", "explicitly query this installed local Ollama model instead of offline retrieval")
 	cmd.Flags().StringVar(&options.endpoint, "learned-endpoint", "http://127.0.0.1:11434", "loopback Ollama origin for explicit learned context")
 	cmd.Flags().StringVar(&options.scope, "learned-scope", "", "exact memory scope for learned context")

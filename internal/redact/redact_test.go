@@ -3,6 +3,7 @@ package redact
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // syntheticAWSSecret builds a 40-character mixed-class value with high
@@ -108,5 +109,56 @@ func TestRedactionMarkersAreStable(t *testing.T) {
 				t.Fatalf("redaction changed on a second pass: %q -> %q", once, twice)
 			}
 		})
+	}
+}
+
+// These credential shapes used to pass redaction unchanged (PGP bodies beyond
+// the first line, quoted JSON keys, opaque HTTP bearer/basic credentials),
+// so they reached manual, MCP, document and import memories verbatim.
+func TestRegressionRedactsPGPKeysQuotedKeysAndHTTPCredentials(t *testing.T) {
+	opaque := strings.Repeat("9f8e7d6c5b4a3928", 2) + "Zz"
+	pgpBody := "lQOYBF0" + strings.Repeat("abcdefghijklmnopqrstuvwxyzABCDEF", 2) + "\n" + strings.Repeat("qrstuvwxyzABCDEFGHIJ0123456789", 2)
+	for _, tc := range []struct{ name, input, secret string }{
+		{"pgp private key block", "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n" + pgpBody + "\n-----END PGP PRIVATE KEY BLOCK-----", "qrstuvwxyzABCDEFGHIJ0123456789"},
+		{"quoted JSON key", `{"db_password": "hunter2"}`, "hunter2"},
+		{"quoted JSON key without spaces", `{"api_key":"q8Zr2LmN"}`, "q8Zr2LmN"},
+		{"single-quoted YAML key", `'client_secret': 'v4lue'`, "v4lue"},
+		{"authorization bearer header", `curl -H "Authorization: Bearer ` + opaque + `" https://example.invalid`, opaque},
+		{"authorization basic header", "Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA"},
+		{"bare bearer token", "send bearer " + opaque + " upstream", opaque},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			redactor := Redactor{}
+			once := redactor.Text(tc.input)
+			if strings.Contains(once, tc.secret) || !strings.Contains(once, "⟨redacted:") {
+				t.Fatalf("unredacted: %q", once)
+			}
+			if twice := redactor.Text(once); twice != once {
+				t.Fatalf("redaction changed on a second pass: %q -> %q", once, twice)
+			}
+		})
+	}
+	for _, value := range []string{"the bearer of bad news", "Authorization header is required", `{"status": "ok", "count": 3}`} {
+		if got := (Redactor{}).Text(value); got != value {
+			t.Errorf("false positive: %q -> %q", value, got)
+		}
+	}
+}
+
+// The entropy pass rebuilt the whole string for each replacement, so text with
+// many secrets took quadratic time (2 MiB of dense secrets: about 26 s).
+func TestDenseRedactionIsLinearAndComplete(t *testing.T) {
+	line := "api value 7dF2aQ9mR4xT8vL1pN6cY3zB5kH0sW2u\n"
+	text := strings.Repeat(line, (2<<20)/len(line))
+	start := time.Now()
+	out := (Redactor{}).Text(text)
+	if elapsed := time.Since(start); elapsed > 10*time.Second*raceSlowdown {
+		t.Fatalf("dense redaction took %s", elapsed)
+	}
+	if strings.Contains(out, "7dF2aQ9mR4xT8vL1pN6cY3zB5kH0sW2u") || strings.Count(out, "⟨redacted:entropy:") != strings.Count(text, "\n") {
+		t.Fatal("dense secrets were not all redacted")
+	}
+	if (Redactor{}).Text(out) != out {
+		t.Fatal("dense redaction is not a fixed point")
 	}
 }

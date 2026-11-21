@@ -27,7 +27,9 @@ func NewOllama(endpoint string) (*Ollama, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid model endpoint")
 	}
-	if (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+	// A bare trailing "?" leaves RawQuery empty but survives u.String(), which
+	// turned every request path into a query string against the root.
+	if (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || (u.Path != "" && u.Path != "/") {
 		return nil, fmt.Errorf("model endpoint must be an HTTP(S) loopback origin without credentials, path or query")
 	}
 	host := u.Hostname()
@@ -61,7 +63,7 @@ func NewOllama(endpoint string) (*Ollama, error) {
 		}
 		return nil, last
 	}
-	return &Ollama{origin: strings.TrimSuffix(u.String(), "/"), client: &http.Client{Transport: transport, Timeout: 45 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("model redirects are not allowed") }}}, nil
+	return &Ollama{origin: u.Scheme + "://" + u.Host, client: &http.Client{Transport: transport, Timeout: 45 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("model redirects are not allowed") }}}, nil
 }
 
 func (o *Ollama) Origin() string { return o.origin }

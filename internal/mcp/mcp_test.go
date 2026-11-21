@@ -54,10 +54,13 @@ func TestRegressionMCPMemoryToolsEnforceOwnDeadlines(t *testing.T) {
 	parent, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	for name, call := range map[string]func(context.Context) error{
-		"brain_remember": func(ctx context.Context) error { _, _, err := s.remember(ctx, nil, rememberInput{Content: "x"}); return err },
-		"brain_recall":   func(ctx context.Context) error { _, _, err := s.recall(ctx, nil, recallInput{Query: "x"}); return err },
-		"brain_query":    func(ctx context.Context) error { _, _, err := s.query(ctx, nil, queryInput{Query: "x"}); return err },
-		"brain_brief":    func(ctx context.Context) error { _, _, err := s.brief(ctx, nil, briefInput{Task: "x"}); return err },
+		"brain_remember": func(ctx context.Context) error {
+			_, _, err := s.remember(ctx, nil, rememberInput{Content: "x"})
+			return err
+		},
+		"brain_recall": func(ctx context.Context) error { _, _, err := s.recall(ctx, nil, recallInput{Query: "x"}); return err },
+		"brain_query":  func(ctx context.Context) error { _, _, err := s.query(ctx, nil, queryInput{Query: "x"}); return err },
+		"brain_brief":  func(ctx context.Context) error { _, _, err := s.brief(ctx, nil, briefInput{Task: "x"}); return err },
 	} {
 		start := time.Now()
 		err := call(parent)

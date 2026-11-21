@@ -30,8 +30,12 @@ describe the checkout when indexed, with their index timestamp.
 - `trace-brain setup [trace.db]` (import sessions from Trace)
 - `trace-brain doctor`
 - `trace-brain mcp [--semantic-model EXACT_INSTALLED_MODEL] [--semantic-endpoint LOCAL_ORIGIN]` (MCP stdio server; learned search defaults off)
-- `trace-brain refresh [--trace-db .trace/trace.db]` (import and return protocol-1 JSON)
-- `trace-brain context [--query words] [--limit 20]` (bounded, read-only protocol-1 JSON)
+- `trace-brain refresh [--trace-db .trace/trace.db]` (import, extract claims and return protocol-1 JSON)
+- `trace-brain facts [--subject S] [--at TIME] [--known-at TIME] [--history] [--json]` (current or historical claims)
+- `trace-brain facts extract [--limit N] [--json]` (offline rule extraction)
+- `trace-brain facts extract --model EXACT_INSTALLED_MODEL [--endpoint LOCAL_ORIGIN]` (opt-in learned extraction)
+- `trace-brain facts assert|query|graph|evidence|retract|forget ...` (see Temporal claims)
+- `trace-brain context [--query words] [--limit 20] [--facts N]` (bounded, read-only protocol-1 JSON)
 
 ## Build
 `go build ./...`
@@ -42,7 +46,7 @@ In an initialized Trace project, new databases default to `.trace/brain/memory.d
 
 Database writers reserve their SQLite write transaction before reading import fingerprints, so concurrent manual saves and daemon refreshes wait rather than fail with a stale-snapshot lock. Concurrent first opens retry transient WAL initialization contention.
 
-`setup` imports sessions and turns transactionally. Repeating it updates the same source entities without creating new memories. `extract` skips unchanged sessions, including external agent calls, and reports failures. It re-checks the evidence fingerprint inside its write transaction after the agent runs, so a concurrent refresh cannot commit a stale extraction. Existing unlinked duplicates created by older versions are preserved. Refresh removes derived `trace-import` memories whose source entity was deleted; manual/MCP notes are retained.
+`setup` imports sessions and turns transactionally. Repeating it updates the same source entities without creating new memories. Turn text is redacted before it is cut; if it exceeds the 64 KiB memory budget, the derived memory keeps its beginning and end around an explicit `bytes omitted` notice, and invalid UTF-8 is replaced, so one oversized turn never blocks the rest of the history. For turns over 512 KiB only the first and last 256 KiB (at line boundaries) are redacted and considered, which bounds the per-refresh cost while any secret overlapping the kept text is still redacted whole. `extract` skips unchanged sessions, including external agent calls, and reports failures. It re-checks the evidence fingerprint inside its write transaction after the agent runs, so a concurrent refresh cannot commit a stale extraction. Existing unlinked duplicates created by older versions are preserved. Refresh removes derived `trace-import` memories whose source entity was deleted; manual/MCP notes are retained.
 
 `viz` escapes memory content as text, writes beside the selected `--db`, and renders at most the 1,000 most recent memories with explicit truncation reporting. `query` is an alias in behavior for `recall`.
 
@@ -70,6 +74,9 @@ IDs, treats quoted text as untrusted data and fingerprints the sampled evidence,
 so changed outcomes invalidate an earlier extraction. The extractor must not infer
 a successful test merely from an intention to run it. All imported, extracted,
 manual and MCP memory content passes through secret-pattern redaction before storage.
+Read paths (recall/query/brief, context, workspace retrieval, dash, viz, get,
+history and every fact listing, query, graph and MCP fact tool) re-apply redaction
+to stored text, so a legacy row cannot bypass the current policy.
 
 Keyword retrieval ranks by SQLite FTS relevance with deterministic recency ties.
 The optional hashed-word ranker omits zero-overlap results; it remains a lexical
@@ -185,8 +192,10 @@ sets an exclusive validity end. Without `--from`, validity starts now. Scopes ar
 exact and default to `project`. Text fields are redacted; claims are never treated
 as certified truth. `--exclusive` rejects overlapping different values for the
 same scoped subject and predicate, including a new nonexclusive value that would
-violate an existing exclusive claim. Resolve a conflict by reviewing and explicitly
-retracting the previous claim; no conclusion is silently replaced.
+violate an existing exclusive claim. Resolve a conflict with another manual claim
+by reviewing and explicitly retracting the previous claim; no manual conclusion is
+silently replaced. The one exception is an older automatically extracted claim:
+a newer manual assertion closes it (see below) and lists it under `supersedes`.
 
 `facts query --at RFC3339 --known-at RFC3339` separates the time a claim applies
 from when it was recorded or retracted. `facts retract ID` preserves prior
@@ -217,6 +226,104 @@ candidate/content budgets and explicit truncation. The read-only `brain_facts` M
 tool accepts validity/recorded times as Unix milliseconds and an `evidence_mode`.
 The read-only `brain_fact_evidence` tool caps content at 16 KiB, preserving valid
 UTF-8 and reporting the full capture's byte count, hash and truncation. Evidence
-content remains untrusted quoted data. Natural-language entity
-extraction, automatic contradiction resolution and comparative graph-quality
+content remains untrusted quoted data. Comparative graph and extraction quality
 benchmarks are still pending.
+
+## Automatic fact extraction and invalidation
+
+After the import commits, `setup` and `refresh` run a deterministic, offline,
+rule-based extractor. It reads Trace turn memories (the prompt, plus reasoning
+paragraphs that start with `Assistant response:` or `Agent output:`; unlabelled
+and `Thinking:` reasoning is skipped, which also drops later paragraphs of a
+multi-paragraph response) and manual, MCP and agent-extract memories. Documents and session headers are not extracted, and
+extraction never writes a memory, so manual notes are unchanged. The rules
+recognize only explicit statements:
+
+- decisions: "we use X for Y", "use X for Y", "X is our Y", "switched/migrated
+  from A to B [for Y]", "we replaced A with B", "we no longer use X";
+- constraints and preferences: "always …", "never …", "do not …", "prefer X over Y";
+- dependencies: package-manager commands (`npm install`, `go get`, `pip install`,
+  `cargo add`, … and their remove forms), "added/removed the dependency on X",
+  "A depends on B";
+- structure and references: "Sym is defined in path", "moved Sym to path", and file
+  paths or backticked symbols mentioned in a turn (`referenced_in turn:ID`).
+
+Questions, hedged or conditional sentences ("maybe", "if", "when", "could",
+"should we", "for example"), negated statements and narrative past-tense policies
+are skipped. Tool and role names are lowercased; paths and symbols keep their case.
+A memory yields at most 16 claims (8 references). Within one memory only the last
+statement counts for an exclusive subject/predicate and for a negation pair about
+the same value ("npm install x … npm uninstall x" keeps only the removal).
+
+Every claim links to its evidence memory, its source session/turn and the exact
+redacted sentence it came from (a quote of at most 512 bytes that must occur
+verbatim in the redacted memory). Subject, object and quote are redacted. A claim
+is valid from the turn's recorded start, or the latest revision of a manual note.
+Claims from Trace history use scope `project`; manual and MCP notes keep their
+memory scope.
+
+`uses` with a role subject, `policy`, `prefers` between two values and `defined_in`
+are exclusive; `uses`/`stopped_using` and `depends_on`/`dropped_dependency` are
+negation pairs. An extracted claim's validity ends where the earliest later claim
+that contradicts it begins — a different value of an exclusive subject/predicate or
+the negated predicate for the same value — counting only claims recorded and not
+retracted at `--known-at`. This closure is derived at read time from the recorded
+claims: nothing is deleted or rewritten, a query at an earlier `--known-at` still
+sees the earlier interval, the result does not depend on import order, and
+retracting or forgetting the newer claim reopens the older one up to the next
+contradiction. Results report the effective `valid_to` and `superseded_by` (the
+newer claim, its evidence memory, its start and when it was recorded).
+
+Manual claims are never closed automatically. An extracted claim that would close
+an active manual claim, or that contradicts another claim at the identical
+instant, is skipped and counted in `conflicts_skipped`. A value restated by more
+memories while three active claims already hold it is not recorded again
+(`claims_already_held`). Extraction state is kept per memory for the rules and for
+each learned model, with their version, and a trigger marks a memory pending when
+its content or scope changes, so re-running adds no duplicates. Claims are recorded
+at the time their write transaction begins. On re-extraction
+identical claims are kept, unsupported ones are retracted (still visible at an
+earlier `--known-at`), and a claim once retracted — by the extractor or with
+`facts retract` — is not restored. Forgetting a memory, or refresh removing a
+derived memory whose source turn was deleted, deletes its claims as before.
+
+Each setup/refresh processes at most 500 pending memories in batches of 32 IMMEDIATE
+transactions and starts no new batch after 15 seconds of extraction or 40 seconds
+after the command began (Trace stops refresh at one minute); the remainder is
+reported as `pending` in the refresh JSON `facts` object, and `facts extract
+--limit N` (1–10,000, no new batch after 45 seconds) processes it explicitly. Extraction stops adding claims at
+8,000 claims in total (of the shared 10,000) and reports `budget_exhausted`.
+Extraction errors are reported as `facts.error` and never fail the import.
+Extracted claims cite a quote rather than a captured copy: in the default current
+mode a claim is stale once its memory no longer contains its quote, while
+`--evidence-mode captured` omits extracted claims and `facts evidence` has none.
+
+`trace-brain facts` lists claims valid at `--at` and known at `--known-at` (both
+default to now) with `--subject`, `--predicate`, `--limit` (1–100),
+`--include-stale` and `--json`; `--history --subject S` lists every claim about S,
+including superseded values. The read-only MCP tool `brain_fact_history` returns
+the same timeline (at most 50 claims, 64 KiB), and `brain_facts` results now
+include origin, quote and supersession. `context --facts N` (0–20, default off)
+adds up to N current, non-stale `project` claims whose subject, object or quote
+contains a query word, with quotes capped at 256 bytes, the evidence memory's
+`evidence_source` and `facts_truncated` reported. Like the memory list, a Trace
+source limits them to claims backed by manual/MCP notes or by memories imported
+from that source. Without the flag the context output is unchanged, and it cannot
+be combined with `--learned-model`.
+
+`facts extract --model EXACT_INSTALLED_MODEL [--endpoint http://127.0.0.1:11434]
+[--limit 1–100]` adds opt-in learned extraction with the same local Ollama policy
+as `embed`: exact installed model, loopback origin without redirects, digest pinned
+before and re-checked after every request (a change aborts), bounded responses, a
+five-minute deadline and no SQLite transaction while the model runs. Setup,
+refresh, context and MCP never invoke it. Each memory of up to 16 KiB of redacted
+text is sent once with a JSON schema at temperature 0; larger memories are skipped
+and counted rather than truncated. A learned claim must use the same predicates,
+quote a sentence that occurs verbatim in the memory and name its value inside that
+quote; other output is rejected. Learned claims record their model and digest and
+take part in the same invalidation. Each model's claims are reconciled only against
+that model's earlier claims (a new digest of the same model re-checks them), so
+running another model never retracts them. An oversized memory or invalid or
+token-limited output is recorded as skipped only if the memory is unchanged; that
+model's claims whose quote has left the memory are then retracted. Only offline protocol tests exist; live model
+quality and latency are unmeasured.

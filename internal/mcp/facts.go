@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -48,6 +49,10 @@ func (s *Server) facts(ctx context.Context, _ *mcp.CallToolRequest, input factQu
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	result, err := store.QueryFacts(ctx, s.DB, store.FactQuery{Scope: input.Scope, Subject: input.Subject, Predicate: input.Predicate, Object: input.Object, At: at, KnownAt: known, Limit: input.Limit, IncludeStale: input.IncludeStale, EvidenceMode: input.EvidenceMode})
+	for i := range result.Facts {
+		f := &result.Facts[i]
+		f.Subject, f.Object, f.Quote = redactText(f.Subject), redactText(f.Object), redactText(f.Quote)
+	}
 	return nil, factQueryOutput{Result: result, At: at, KnownAt: known, EvidenceCheck: store.FactEvidenceCheck(result.EvidenceMode)}, err
 }
 
@@ -80,4 +85,61 @@ func (s *Server) factEvidence(ctx context.Context, _ *mcp.CallToolRequest, input
 	content, bytes, truncated := store.CapFactEvidenceContent(evidence.Content)
 	evidence.Content = content
 	return nil, factEvidenceOutput{Evidence: evidence, KnownAt: known, ContentBytes: bytes, ContentTruncated: truncated}, nil
+}
+
+type factHistoryInput struct {
+	Scope     string `json:"scope,omitempty"`
+	Subject   string `json:"subject"`
+	Predicate string `json:"predicate,omitempty"`
+	KnownAt   *int64 `json:"known_at,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+type factHistoryOutput struct {
+	Result        store.FactResults `json:"result"`
+	KnownAt       int64             `json:"known_at"`
+	Scope         string            `json:"scope"`
+	EvidenceCheck string            `json:"evidence_check"`
+}
+
+// maxFactHistoryBytes bounds the encoded brain_fact_history payload.
+const maxFactHistoryBytes = 64 << 10
+
+// factHistory returns every claim about one subject known at known_at,
+// including values later superseded, with their effective validity.
+func (s *Server) factHistory(ctx context.Context, _ *mcp.CallToolRequest, input factHistoryInput) (*mcp.CallToolResult, factHistoryOutput, error) {
+	if input.Limit == 0 {
+		input.Limit = 20
+	}
+	if input.Limit < 1 || input.Limit > 50 {
+		return nil, factHistoryOutput{}, fmt.Errorf("fact history limit must be 1–50")
+	}
+	if input.Scope == "" {
+		input.Scope = "project"
+	}
+	known := time.Now().UnixMilli()
+	if input.KnownAt != nil {
+		known = *input.KnownAt
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	result, err := store.FactTimeline(ctx, s.DB, store.TimelineQuery{Scope: input.Scope, Subject: input.Subject, Predicate: input.Predicate, KnownAt: known, Limit: input.Limit})
+	if err != nil {
+		return nil, factHistoryOutput{}, err
+	}
+	for i := range result.Facts {
+		f := &result.Facts[i]
+		f.Subject, f.Object, f.Quote = redactText(f.Subject), redactText(f.Object), redactText(f.Quote)
+	}
+	out := factHistoryOutput{Result: result, KnownAt: known, Scope: input.Scope, EvidenceCheck: "current_memory_hash_or_quote"}
+	for {
+		encoded, err := json.Marshal(out)
+		if err != nil {
+			return nil, factHistoryOutput{}, err
+		}
+		if len(encoded) <= maxFactHistoryBytes || len(out.Result.Facts) == 0 {
+			return nil, out, nil
+		}
+		out.Result.Facts = out.Result.Facts[:len(out.Result.Facts)-1]
+		out.Result.Truncated = true
+	}
 }

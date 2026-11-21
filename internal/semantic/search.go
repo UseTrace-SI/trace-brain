@@ -73,7 +73,7 @@ func ValidateSearch(in SearchRequest) error {
 		return fmt.Errorf("scope must contain at most 256 valid UTF-8 bytes")
 	}
 	if len(in.SourceDB) > 4096 || !utf8.ValidString(in.SourceDB) {
-		return fmt.Errorf("Trace source identity must contain at most 4096 valid UTF-8 bytes")
+		return fmt.Errorf("the Trace source identity must contain at most 4096 valid UTF-8 bytes")
 	}
 	if in.Limit < 1 || in.Limit > 50 {
 		return fmt.Errorf("limit must be 1–50")
@@ -91,7 +91,7 @@ func validDigest(digest string) bool {
 // redactAlgorithmVersion identifies the redaction algorithm used when deriving
 // embedding fingerprints. Bump it whenever redaction output can change so that
 // vectors embedded under the old rules are detected as stale.
-const redactAlgorithmVersion = "redact-v1"
+const redactAlgorithmVersion = "redact-v2"
 
 // contentHash binds an embedding to the exact redacted text sent to the model
 // plus the redaction algorithm version. The version makes the fingerprint
