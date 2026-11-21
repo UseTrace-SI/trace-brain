@@ -3,6 +3,7 @@ package redact
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // syntheticAWSSecret builds a 40-character mixed-class value with high
@@ -141,5 +142,23 @@ func TestRegressionRedactsPGPKeysQuotedKeysAndHTTPCredentials(t *testing.T) {
 		if got := (Redactor{}).Text(value); got != value {
 			t.Errorf("false positive: %q -> %q", value, got)
 		}
+	}
+}
+
+// The entropy pass rebuilt the whole string for each replacement, so text with
+// many secrets took quadratic time (2 MiB of dense secrets: about 26 s).
+func TestDenseRedactionIsLinearAndComplete(t *testing.T) {
+	line := "api value 7dF2aQ9mR4xT8vL1pN6cY3zB5kH0sW2u\n"
+	text := strings.Repeat(line, (2<<20)/len(line))
+	start := time.Now()
+	out := (Redactor{}).Text(text)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("dense redaction took %s", elapsed)
+	}
+	if strings.Contains(out, "7dF2aQ9mR4xT8vL1pN6cY3zB5kH0sW2u") || strings.Count(out, "⟨redacted:entropy:") != strings.Count(text, "\n") {
+		t.Fatal("dense secrets were not all redacted")
+	}
+	if (Redactor{}).Text(out) != out {
+		t.Fatal("dense redaction is not a fixed point")
 	}
 }

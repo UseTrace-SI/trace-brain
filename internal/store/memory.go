@@ -55,6 +55,11 @@ func RedactImportedContent(content string) (string, error) {
 // BoundImportedContent; the notice itself is always shorter.
 const importOmissionReserve = 128
 
+// importRawWindow bounds the raw text redacted from each end of an oversized
+// import. It is far larger than the parts kept, so any secret overlapping the
+// kept text lies wholly inside a window and is redacted before the final cut.
+const importRawWindow = 256 << 10
+
 // BoundImportedContent prepares Trace history text for a derived memory. Trace
 // appends every assistant response, thought and output to a turn without a
 // size limit, so rejecting an oversized turn (or one with invalid UTF-8) would
@@ -69,14 +74,23 @@ func BoundImportedContent(content string) (string, error) {
 	if strings.TrimSpace(content) == "" {
 		return "", fmt.Errorf("imported memory must not be empty")
 	}
+	// Redaction is linear but still runs on every refresh to fingerprint each
+	// turn, so only bounded windows of a very large turn are redacted.
+	omitted := 0
+	if len(content) > 2*importRawWindow {
+		head := cutAtLine(content, importRawWindow, false)
+		tail := cutAtLine(content, len(content)-importRawWindow, true)
+		omitted = tail - head
+		content = content[:head] + "\n" + content[tail:]
+	}
 	r := redact.Redactor{}
 	redacted := r.Text(content)
-	if len(redacted) <= maxMemoryContentBytes {
+	if omitted == 0 && len(redacted) <= maxMemoryContentBytes {
 		return redacted, nil
 	}
 	budget := maxMemoryContentBytes
 	for attempt := 0; attempt < 4 && budget > importOmissionReserve; attempt++ {
-		bounded := r.Text(omitMiddle(redacted, budget))
+		bounded := r.Text(omitMiddle(redacted, budget, omitted))
 		if len(bounded) <= maxMemoryContentBytes {
 			return bounded, nil
 		}
@@ -86,15 +100,37 @@ func BoundImportedContent(content string) (string, error) {
 }
 
 // omitMiddle keeps about three quarters of budget from the start of text and
-// the rest from its end, joined by a notice naming the omitted byte count.
-func omitMiddle(text string, budget int) string {
+// the rest from its end, joined by a notice naming the omitted byte count
+// (including alreadyOmitted bytes dropped before redaction).
+func omitMiddle(text string, budget, alreadyOmitted int) string {
 	available := budget - importOmissionReserve
 	head := cutBefore(text, available*3/4)
 	tail := cutAfter(text, len(text)-(available-available*3/4))
 	if tail < head {
 		tail = head
 	}
-	return text[:head] + fmt.Sprintf("\n[trace-brain: %d bytes omitted to fit the 64 KiB memory budget]\n", tail-head) + text[tail:]
+	return text[:head] + fmt.Sprintf("\n[trace-brain: %d bytes omitted to fit the 64 KiB memory budget]\n", tail-head+alreadyOmitted) + text[tail:]
+}
+
+// cutAtLine moves offset n to a nearby line start (forward when after is set,
+// backward otherwise), or else to a rune boundary.
+func cutAtLine(text string, n int, after bool) int {
+	if after {
+		if i := strings.IndexByte(text[n:min(len(text), n+4096)], '\n'); i >= 0 {
+			return n + i + 1
+		}
+		for n < len(text) && !utf8.RuneStart(text[n]) {
+			n++
+		}
+		return n
+	}
+	if i := strings.LastIndexByte(text[max(0, n-4096):n], '\n'); i >= 0 {
+		return max(0, n-4096) + i + 1
+	}
+	for n > 0 && !utf8.RuneStart(text[n]) {
+		n--
+	}
+	return n
 }
 
 const redactionMarkerOpen, redactionMarkerClose = "⟨redacted:", "⟩"

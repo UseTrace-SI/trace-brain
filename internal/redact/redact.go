@@ -86,10 +86,14 @@ func (r Redactor) Text(s string) string {
 	if context {
 		s = redactEnvValues(s)
 	}
+	// Every decision below reads the unmodified original, so replacements are
+	// assembled in one forward pass; rebuilding the string per replacement
+	// was quadratic in the number of redactions.
 	original := s
-	indexes := candidate.FindAllStringIndex(original, -1)
-	for i := len(indexes) - 1; i >= 0; i-- {
-		start, end := indexes[i][0], indexes[i][1]
+	var out strings.Builder
+	last := 0
+	for _, index := range candidate.FindAllStringIndex(original, -1) {
+		start, end := index[0], index[1]
 		from := start - 30
 		if from < 0 {
 			from = 0
@@ -110,7 +114,13 @@ func (r Redactor) Text(s string) string {
 		if !highEntropy || (!keyContext.MatchString(original[from:start]) && !markerContext && !secretKey) {
 			continue
 		}
-		s = s[:start] + marker("entropy", value) + s[end:]
+		out.WriteString(original[last:start])
+		out.WriteString(marker("entropy", value))
+		last = end
+	}
+	if last > 0 {
+		out.WriteString(original[last:])
+		s = out.String()
 	}
 	if r.PII {
 		s = email.ReplaceAllStringFunc(s, func(v string) string { return marker("email", v) })

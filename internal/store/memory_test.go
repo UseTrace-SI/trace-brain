@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/UseTrace-SI/trace-brain/internal/redact"
@@ -160,5 +161,31 @@ func TestRegressionBoundImportedContentKeepsHeadTailAndRedactsBeforeCutting(t *t
 	}
 	if _, err := BoundImportedContent(" \n\t"); err == nil {
 		t.Fatal("accepted empty imported text")
+	}
+}
+
+// Bounding redacted the whole raw turn on every refresh, so one huge turn with
+// many secrets made each refresh exceed Trace's one-minute limit. Only bounded
+// windows of each end are redacted now, far larger than the kept text.
+func TestBoundImportedContentRedactsOnlyBoundedWindowsOfHugeTurns(t *testing.T) {
+	secret := "api value 7dF2aQ9mR4xT8vL1pN6cY3zB5kH0sW2u\n"
+	huge := "PROMPT-HEAD\n" + strings.Repeat(secret, (20<<20)/len(secret)) + "FINAL-OUTCOME"
+	start := time.Now()
+	got, err := BoundImportedContent(huge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("bounding a 20 MiB turn took %s", elapsed)
+	}
+	if len(got) > maxMemoryContentBytes || !strings.HasPrefix(got, "PROMPT-HEAD") || !strings.HasSuffix(got, "FINAL-OUTCOME") || strings.Contains(got, "7dF2aQ9mR4xT8vL1pN6cY3zB5kH0sW2u") {
+		t.Fatalf("bounded huge turn: %d bytes, head/tail kept=%v/%v", len(got), strings.HasPrefix(got, "PROMPT-HEAD"), strings.HasSuffix(got, "FINAL-OUTCOME"))
+	}
+	var omitted int
+	if _, err := fmt.Sscanf(got[strings.Index(got, "[trace-brain: "):], "[trace-brain: %d bytes omitted", &omitted); err != nil || omitted < len(huge)-2*maxMemoryContentBytes {
+		t.Fatalf("omission notice understates the dropped bytes: %d of %d (%v)", omitted, len(huge), err)
+	}
+	if (redact.Redactor{}).Text(got) != got {
+		t.Fatal("bounded text is not a redaction fixed point")
 	}
 }
