@@ -92,13 +92,6 @@ func negationSQL(column string) string {
 	return b.String()
 }
 
-// contradictionSQL matches a claim y that contradicts claim f: a different
-// value of an exclusive subject/predicate pair, or the negated predicate for
-// the same value.
-func contradictionSQL() string {
-	return `((y.predicate=f.predicate AND y.object<>f.object AND (f.is_exclusive=1 OR y.is_exclusive=1)) OR (y.object=f.object AND y.predicate=` + negationSQL("f.predicate") + `))`
-}
-
 // closureSQL is the valid-time end that later contradicting claims impose on
 // an extracted claim f (joined to fact_sources as s), as known at the named
 // parameter. Invalidation is derived from recorded claims at read time, so it

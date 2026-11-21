@@ -85,7 +85,7 @@ func TestOllamaRejectsMalformedVectorsAndNeverFollowsRedirects(t *testing.T) {
 			redirected = true
 			return
 		}
-		http.Redirect(w, r, "http://127.0.0.1:9999/", 307)
+		http.Redirect(w, r, "http://127.0.0.1:9999/", http.StatusTemporaryRedirect)
 	}))
 	if _, err := provider.Embed(context.Background(), "m", []string{"private"}); err == nil || redirected {
 		t.Fatal("followed model redirect")

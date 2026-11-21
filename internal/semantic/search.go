@@ -73,7 +73,7 @@ func ValidateSearch(in SearchRequest) error {
 		return fmt.Errorf("scope must contain at most 256 valid UTF-8 bytes")
 	}
 	if len(in.SourceDB) > 4096 || !utf8.ValidString(in.SourceDB) {
-		return fmt.Errorf("Trace source identity must contain at most 4096 valid UTF-8 bytes")
+		return fmt.Errorf("the Trace source identity must contain at most 4096 valid UTF-8 bytes")
 	}
 	if in.Limit < 1 || in.Limit > 50 {
 		return fmt.Errorf("limit must be 1–50")

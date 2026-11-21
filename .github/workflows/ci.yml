@@ -32,6 +32,10 @@ jobs:
           CGO_ENABLED: '0'
       - name: Vet
         run: go vet ./...
+      - name: Staticcheck
+        run: |
+          GOTOOLCHAIN=local go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          staticcheck ./...
       - name: Race tests
         run: go test -race -count=1 -timeout=5m ./...
       - name: Repeat regression checks 100 times

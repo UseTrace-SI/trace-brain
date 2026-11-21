@@ -53,6 +53,7 @@ func TestExtractionUsesChangedEvidenceAndRedactsOutput(t *testing.T) {
 		t.Fatalf("unsafe extracted memory: %s %v", content, err)
 	}
 }
+
 // Imported turn/session content must respect the same 64 KiB memory budget as
 // Remember and Update. Reads, embeddings, fact evidence and semantic caching
 // all assume memories fit in 64 KiB, so an unbounded import silently breaks
