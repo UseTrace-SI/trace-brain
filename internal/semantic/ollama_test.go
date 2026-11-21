@@ -91,3 +91,24 @@ func TestOllamaRejectsMalformedVectorsAndNeverFollowsRedirects(t *testing.T) {
 		t.Fatal("followed model redirect")
 	}
 }
+
+// An endpoint with a bare trailing "?" passed validation, so every request was
+// sent to the root path with the API path as its query string, and the cache
+// identity differed from the canonical origin.
+func TestRegressionOllamaRejectsEndpointWithEmptyQueryAndUsesCanonicalOrigin(t *testing.T) {
+	for _, endpoint := range []string{"http://127.0.0.1:11434?", "http://127.0.0.1:11434/?", "http://localhost:11434/?#"} {
+		if _, err := NewOllama(endpoint); err == nil {
+			t.Fatalf("accepted %s", endpoint)
+		}
+	}
+	for endpoint, want := range map[string]string{"http://127.0.0.1:11434/": "http://127.0.0.1:11434", "http://[::1]:11434": "http://[::1]:11434", "http://localhost:11434#": "http://localhost:11434"} {
+		provider, err := NewOllama(endpoint)
+		if err != nil {
+			t.Fatalf("%s: %v", endpoint, err)
+		}
+		if got := provider.Origin(); got != want {
+			t.Fatalf("%s: origin %q, want %q", endpoint, got, want)
+		}
+		provider.Close()
+	}
+}
