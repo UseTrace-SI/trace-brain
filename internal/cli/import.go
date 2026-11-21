@@ -139,7 +139,7 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 				return false, nil
 			}
 		}
-		id := fmt.Sprintf("import-%x", sha256.Sum256([]byte(path+"\x00"+source+"\x00"+kind+"\x00"+entityID)))
+		id := importMemoryID(path, source, kind, entityID)
 		if _, err := writeTx.ExecContext(ctx, `INSERT INTO memories(id,scope,content,source,session_id,turn_id,created_at) VALUES(?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET content=excluded.content`, id, kind, content, source, sid, tid, time.Now().UnixMilli()); err != nil {
 			return false, err
@@ -198,7 +198,17 @@ ON CONFLICT(source_db,source,entity_kind,entity_id) DO UPDATE SET fingerprint=ex
 	}
 	turns := 0
 	if !extract {
-		rows, err := src.QueryContext(ctx, "SELECT id, session_id, seq, prompt, reasoning FROM turns")
+		// Claims derived from a turn are valid from when it was recorded,
+		// not from when this import ran. Older Trace schemas lack the column.
+		started := "NULL"
+		var hasStarted int
+		if err := src.QueryRowContext(ctx, "SELECT count(*) FROM pragma_table_info('turns') WHERE name='started_at'").Scan(&hasStarted); err != nil {
+			return err
+		}
+		if hasStarted == 1 {
+			started = "started_at"
+		}
+		rows, err := src.QueryContext(ctx, "SELECT id, session_id, seq, prompt, reasoning, "+started+" FROM turns")
 		if err != nil {
 			return err
 		}
@@ -206,7 +216,8 @@ ON CONFLICT(source_db,source,entity_kind,entity_id) DO UPDATE SET fingerprint=ex
 			var tid, sid string
 			var seq int
 			var prompt, reasoning sql.NullString
-			if err := rows.Scan(&tid, &sid, &seq, &prompt, &reasoning); err != nil {
+			var startedAt sql.NullInt64
+			if err := rows.Scan(&tid, &sid, &seq, &prompt, &reasoning, &startedAt); err != nil {
 				rows.Close()
 				return err
 			}
@@ -221,6 +232,13 @@ ON CONFLICT(source_db,source,entity_kind,entity_id) DO UPDATE SET fingerprint=ex
 			}
 			if changed {
 				turns++
+			}
+			if startedAt.Valid && startedAt.Int64 >= 0 {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO memory_source_times(memory_id,source_at) SELECT id,? FROM memories WHERE id=?
+ON CONFLICT(memory_id) DO UPDATE SET source_at=excluded.source_at WHERE source_at IS NOT excluded.source_at`, startedAt.Int64, importMemoryID(path, source, "turns", tid)); err != nil {
+					rows.Close()
+					return err
+				}
 			}
 		}
 		err = rows.Err()
@@ -246,6 +264,11 @@ ON CONFLICT(source_db,source,entity_kind,entity_id) DO UPDATE SET fingerprint=ex
 		_, err = fmt.Fprintf(out, "imported %d sessions\nimported %d turns\n", sessions, turns)
 	}
 	return err
+}
+
+// importMemoryID is the stable ID of the memory derived from a source entity.
+func importMemoryID(path, source, kind, entityID string) string {
+	return fmt.Sprintf("import-%x", sha256.Sum256([]byte(path+"\x00"+source+"\x00"+kind+"\x00"+entityID)))
 }
 
 // Stop a noisy subprocess before it can exhaust the watcher process.

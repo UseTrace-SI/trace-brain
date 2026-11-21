@@ -57,7 +57,7 @@ func factQueryFlags(cmd *cobra.Command, flags *factTimes, limit int) {
 }
 func factsCmd() *cobra.Command {
 	var scope string
-	parent := &cobra.Command{Use: "facts", Short: "Manage evidence-linked temporal claims; content is not certified as true"}
+	parent := &cobra.Command{Use: "facts", Short: "List and manage evidence-linked temporal claims; content is not certified as true"}
 	parent.PersistentFlags().StringVar(&scope, "scope", "project", "exact local fact scope")
 	var evidence, from, until string
 	var exclusive bool
@@ -200,7 +200,8 @@ func factsCmd() *cobra.Command {
 		}
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"forgotten": args[0], "local_only": true})
 	}}
-	parent.AddCommand(assert, retract, query, graph, inspect, forget)
+	factsListCmd(parent, &scope)
+	parent.AddCommand(assert, retract, query, graph, inspect, forget, factsExtractCmd())
 	return parent
 }
 

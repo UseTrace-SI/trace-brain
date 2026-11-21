@@ -25,7 +25,8 @@ func refreshCmd() *cobra.Command {
 		if err := importTrace(cmd.Context(), io.Discard, source, "", false); err != nil {
 			return err
 		}
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "status": "ready"})
+		// Extraction is bounded and reported; it never fails the import.
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "status": "ready", "facts": extractAfterImport(cmd.Context())})
 	}}
 	cmd.Flags().StringVar(&source, "trace-db", ".trace/trace.db", "Trace history database (read-only)")
 	return cmd
