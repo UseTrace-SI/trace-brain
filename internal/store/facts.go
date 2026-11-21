@@ -11,6 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/UseTrace-SI/trace-brain/internal/extract"
 	"github.com/UseTrace-SI/trace-brain/internal/redact"
 )
 
@@ -29,6 +30,18 @@ type Fact struct {
 	Exclusive        bool   `json:"exclusive"`
 	EvidenceStale    bool   `json:"evidence_stale"`
 	EvidenceCaptured bool   `json:"evidence_captured"`
+	// Origin is "manual" for asserted claims or "extracted" for claims derived
+	// automatically; extracted claims cite a bounded quote of their evidence.
+	Origin            string `json:"origin"`
+	Extractor         string `json:"extractor,omitempty"`
+	ExtractorVersion  string `json:"extractor_version,omitempty"`
+	Quote             string `json:"quote,omitempty"`
+	EvidenceSessionID string `json:"evidence_session_id,omitempty"`
+	EvidenceTurnID    string `json:"evidence_turn_id,omitempty"`
+	// SupersededBy names the later claim whose start closes ValidTo.
+	SupersededBy *Supersession `json:"superseded_by,omitempty"`
+	// Supersedes lists extracted claims this assertion closed (assert only).
+	Supersedes []string `json:"supersedes,omitempty"`
 }
 type FactQuery struct {
 	Scope, Subject, Predicate, Object, Entity string
@@ -97,21 +110,52 @@ func AssertFact(ctx context.Context, db *sql.DB, input Fact, at int64) (Fact, er
 	if len(content) > 65536 || !utf8.ValidString(content) {
 		return Fact{}, fmt.Errorf("redacted fact evidence exceeds budget or is invalid UTF-8")
 	}
-	var conflicts int
 	var end any
 	if input.ValidTo != nil {
 		end = *input.ValidTo
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM facts WHERE scope=? AND subject=? AND predicate=? AND object<>? AND retracted_at IS NULL
- AND (is_exclusive=1 OR ?=1) AND valid_from<coalesce(?,9223372036854775807) AND coalesce(valid_to,9223372036854775807)>?`, input.Scope, input.Subject, input.Predicate, input.Object, input.Exclusive, end, input.ValidFrom).Scan(&conflicts); err != nil {
+	// Overlapping contradictions are rejected, except older extracted claims:
+	// a newer manual assertion closes those (derived at read time) and the
+	// closed claims are reported. Manual claims are never closed automatically.
+	rows, err := tx.QueryContext(ctx, `SELECT f.id,f.valid_from,s.fact_id IS NOT NULL FROM facts f LEFT JOIN fact_sources s ON s.fact_id=f.id
+ WHERE f.scope=@scope AND f.subject=@subject AND f.retracted_at IS NULL
+ AND ((f.predicate=@predicate AND f.object<>@object AND (f.is_exclusive=1 OR @exclusive=1)) OR (s.fact_id IS NOT NULL AND f.object=@object AND f.predicate=@negation))
+ AND f.valid_from<coalesce(@end,`+sqlMaxInt+`) AND coalesce(`+effectiveEndSQL("f.valid_to", closureSQL("@at"))+`,`+sqlMaxInt+`)>@from ORDER BY f.valid_from,f.id`,
+		sql.Named("scope", input.Scope), sql.Named("subject", input.Subject), sql.Named("predicate", input.Predicate), sql.Named("object", input.Object),
+		sql.Named("exclusive", input.Exclusive), sql.Named("negation", extract.Negation(input.Predicate)), sql.Named("end", end), sql.Named("from", input.ValidFrom), sql.Named("at", at))
+	if err != nil {
 		return Fact{}, err
 	}
-	if conflicts > 0 {
+	supersedes, conflicting := []string{}, false
+	for rows.Next() {
+		var id string
+		var from int64
+		var extracted bool
+		if err := rows.Scan(&id, &from, &extracted); err != nil {
+			rows.Close()
+			return Fact{}, err
+		}
+		if extracted && from < input.ValidFrom {
+			supersedes = append(supersedes, id)
+		} else {
+			conflicting = true
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return Fact{}, err
+	}
+	if conflicting {
 		return Fact{}, fmt.Errorf("conflicting active exclusive assertion; query and explicitly retract the prior claim first")
 	}
 	input.EvidenceHash = factHash(content)
 	input.RetractedAt = nil
 	input.EvidenceStale = false
+	input.Origin = OriginManual
+	if len(supersedes) > 0 {
+		input.Supersedes = supersedes
+	}
 	err = tx.QueryRowContext(ctx, `SELECT id,recorded_at FROM facts WHERE scope=? AND subject=? AND predicate=? AND object=? AND valid_from=? AND valid_to IS ?
  AND evidence_id=? AND evidence_hash=? AND is_exclusive=? AND retracted_at IS NULL LIMIT 1`, input.Scope, input.Subject, input.Predicate, input.Object, input.ValidFrom, end, input.EvidenceID, input.EvidenceHash, input.Exclusive).Scan(&input.ID, &input.RecordedAt)
 	if err == nil {
@@ -183,19 +227,8 @@ func QueryFacts(ctx context.Context, db *sql.DB, input FactQuery) (FactResults, 
 	if err != nil {
 		return result, err
 	}
-	installed, err := hasFactCaptures(ctx, db)
-	if err != nil {
-		return result, err
-	}
-	capturedColumns, capturedJoin := "NULL,NULL", ""
-	if installed {
-		capturedColumns = "substr(e.content,1,65537),e.captured_at"
-		capturedJoin = " LEFT JOIN fact_evidence e ON e.fact_id=f.id"
-	}
-	query := `SELECT f.id,f.scope,f.subject,f.predicate,f.object,f.valid_from,f.valid_to,f.recorded_at,f.retracted_at,f.evidence_id,f.evidence_hash,f.is_exclusive,substr(m.content,1,65537),` + capturedColumns + `
- FROM facts f JOIN memories m ON m.id=f.evidence_id` + capturedJoin + ` WHERE f.scope=? AND f.valid_from<=? AND (f.valid_to IS NULL OR f.valid_to>?)
- AND f.recorded_at<=? AND (f.retracted_at IS NULL OR f.retracted_at>?)`
-	args := []any{scope, input.At, input.At, input.KnownAt, input.KnownAt}
+	where := "f.scope=@scope AND f.valid_from<=@at AND f.recorded_at<=@known AND (f.retracted_at IS NULL OR f.retracted_at>@known)"
+	args := []any{sql.Named("scope", scope), sql.Named("at", input.At), sql.Named("known", input.KnownAt)}
 	for _, filter := range []struct {
 		column, value string
 		max           int
@@ -205,8 +238,8 @@ func QueryFacts(ctx context.Context, db *sql.DB, input FactQuery) (FactResults, 
 			if err != nil {
 				return result, err
 			}
-			query += " AND f." + filter.column + "=?"
-			args = append(args, value)
+			where += " AND f." + filter.column + "=@" + filter.column
+			args = append(args, sql.Named(filter.column, value))
 		}
 	}
 	if input.Entity != "" {
@@ -214,25 +247,24 @@ func QueryFacts(ctx context.Context, db *sql.DB, input FactQuery) (FactResults, 
 		if err != nil {
 			return result, err
 		}
-		query += " AND (f.subject=? OR f.object=?)"
-		args = append(args, value, value)
+		where += " AND (f.subject=@entity OR f.object=@entity)"
+		args = append(args, sql.Named("entity", value))
 	}
-	query += " ORDER BY f.recorded_at DESC,f.id LIMIT 1001"
-	var claimsInstalled int
-	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='facts'").Scan(&claimsInstalled); err != nil {
+	schema, installed, err := readClaimSchema(ctx, db)
+	if err != nil || !installed {
 		return result, err
 	}
-	if claimsInstalled == 0 {
-		return result, nil
-	}
+	// Validity uses the effective end: the asserted end or, for extracted
+	// claims, the start of a later contradicting claim known at KnownAt.
+	query := claimSelect(schema, where) + " WHERE effective_to IS NULL OR effective_to>@at ORDER BY recorded_at DESC,id LIMIT 1001"
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return result, err
 	}
-	defer rows.Close()
-	candidates, bytes := 0, 0
+	collected, candidates, bytes := []claimRow{}, 0, 0
 	for rows.Next() {
 		if err := ctx.Err(); err != nil {
+			rows.Close()
 			return result, err
 		}
 		candidates++
@@ -240,42 +272,41 @@ func QueryFacts(ctx context.Context, db *sql.DB, input FactQuery) (FactResults, 
 			result.Truncated = true
 			break
 		}
-		var fact Fact
-		var until, retracted sql.NullInt64
-		var content string
-		var captured sql.NullString
-		var capturedAt sql.NullInt64
-		if err := rows.Scan(&fact.ID, &fact.Scope, &fact.Subject, &fact.Predicate, &fact.Object, &fact.ValidFrom, &until, &fact.RecordedAt, &retracted, &fact.EvidenceID, &fact.EvidenceHash, &fact.Exclusive, &content, &captured, &capturedAt); err != nil {
+		row, err := scanClaim(rows)
+		if err != nil {
+			rows.Close()
 			return result, err
 		}
-		bytes += len(content) + len(captured.String)
+		bytes += len(row.content.String) + len(row.captured.String)
 		if bytes > 8*1024*1024 {
 			result.Truncated = true
 			break
 		}
-		if until.Valid {
-			value := until.Int64
-			fact.ValidTo = &value
-		}
-		if retracted.Valid && retracted.Int64 <= input.KnownAt {
-			value := retracted.Int64
-			fact.RetractedAt = &value
-		}
-		fact.EvidenceStale = len(content) > 65536 || fact.EvidenceHash != factHash(content)
-		fact.EvidenceCaptured = captured.Valid && capturedAt.Valid && validFactCapture(captured.String, fact.EvidenceHash, capturedAt.Int64, input.KnownAt)
-		if mode == "captured" && !fact.EvidenceCaptured {
+		row.evaluate(input.KnownAt)
+		if mode == "captured" && !row.fact.EvidenceCaptured {
 			result.EvidenceUnavailableOmitted++
 			continue
 		}
-		if mode == "current" && fact.EvidenceStale && !input.IncludeStale {
+		if mode == "current" && row.fact.EvidenceStale && !input.IncludeStale {
 			result.StaleOmitted++
 			continue
 		}
-		if len(result.Facts) >= input.Limit {
+		if len(collected) >= input.Limit {
 			result.Truncated = true
 			break
 		}
-		result.Facts = append(result.Facts, fact)
+		collected = append(collected, row)
 	}
-	return result, rows.Err()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return result, err
+	}
+	if err := attachSupersessions(ctx, db, collected, input.KnownAt); err != nil {
+		return result, err
+	}
+	for _, row := range collected {
+		result.Facts = append(result.Facts, row.fact)
+	}
+	return result, nil
 }

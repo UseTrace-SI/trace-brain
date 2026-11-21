@@ -136,6 +136,23 @@ END;
 CREATE TRIGGER IF NOT EXISTS fact_evidence_usage_keep BEFORE DELETE ON fact_evidence_usage BEGIN
  SELECT RAISE(ABORT,'fact_evidence_usage_required');
 END;
+CREATE INDEX IF NOT EXISTS facts_evidence ON facts(evidence_id);
+CREATE TABLE IF NOT EXISTS fact_sources (
+ fact_id TEXT PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE,
+ extractor TEXT NOT NULL CHECK(extractor IN ('rules','ollama')),
+ version TEXT NOT NULL CHECK(length(version) BETWEEN 1 AND 512),
+ quote TEXT NOT NULL CHECK(length(CAST(quote AS BLOB)) BETWEEN 1 AND 512));
+CREATE TABLE IF NOT EXISTS fact_extraction_state (
+ memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+ extractor TEXT NOT NULL,version TEXT NOT NULL,content_hash TEXT NOT NULL,
+ claims INTEGER NOT NULL,extracted_at INTEGER NOT NULL,PRIMARY KEY(memory_id,extractor));
+CREATE TABLE IF NOT EXISTS memory_source_times (
+ memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+ source_at INTEGER NOT NULL CHECK(source_at>=0));
+CREATE TRIGGER IF NOT EXISTS memories_extraction_changed AFTER UPDATE OF content,scope ON memories
+ WHEN old.content IS NOT new.content OR old.scope IS NOT new.scope BEGIN
+ DELETE FROM fact_extraction_state WHERE memory_id=new.id;
+END;
 CREATE TRIGGER IF NOT EXISTS memory_revisions_cap AFTER INSERT ON memory_revisions BEGIN
   DELETE FROM memory_revisions WHERE memory_id=NEW.memory_id AND revision NOT IN
     (SELECT revision FROM memory_revisions WHERE memory_id=NEW.memory_id ORDER BY revision DESC LIMIT %d);
