@@ -156,8 +156,13 @@ concurrent first runs of any Trace component agree on one key; a damaged key is
 replaced under an advisory lock (`redaction.key.lock`), moved aside to
 `redaction.key.damaged` and never overwritten in place; a symlink or other
 non-regular file is never used; a group/world-readable key is tightened to 0600.
-Equal secrets therefore carry equal markers in every Trace component, and a marker
-no longer confirms a guessed secret. `trace-brain doctor` reports which key is in use.
+A marker no longer confirms a guessed secret, and when trace-brain and the Trace CLI
+detect the same span of text with the same rule kind they produce the same marker.
+Their detection rules are not yet shared, however: the rule sets, minimum lengths and
+what a rule includes in the hashed value (for example surrounding quotes or a label
+name) differ, so the same secret can still be redacted with a different marker, or
+redacted by only one component. Aligning the rules in a shared module is follow-up
+work. `trace-brain doctor` reports which key is in use.
 
 If the shared key cannot be read or created, markers use an ephemeral per-process
 key (still unguessable, but not equal across processes). Nothing that is compared
