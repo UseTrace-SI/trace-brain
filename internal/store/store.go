@@ -61,7 +61,70 @@ func Open(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// SchemaVersion is the PRAGMA user_version written by this binary. Databases
+// created before schema versioning report 0 and are upgraded in place.
+const SchemaVersion = 1
+
+// migration upgrades a database from version-1 to version inside the single
+// IMMEDIATE transaction opened by migrate. Steps must be safe to apply to any
+// database that reached the previous version, including pre-versioning files
+// written by older releases.
+type migration struct {
+	version int
+	name    string
+	apply   func(*sql.Tx) error
+}
+
+var migrations = []migration{
+	{1, "baseline schema", migrateBaseline},
+}
+
+// migrate brings the database to SchemaVersion. An up-to-date database needs
+// only a header read, so ordinary opens no longer rewrite schema objects or
+// prune revisions. Concurrent openers serialize on the IMMEDIATE transaction
+// and re-read the version inside it, so each step runs exactly once.
 func migrate(db *sql.DB) error {
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("reading schema version: %w", err)
+	}
+	if version == SchemaVersion {
+		return nil
+	}
+	if version > SchemaVersion {
+		return fmt.Errorf("memory database schema version %d is newer than this trace-brain supports (%d); upgrade trace-brain", version, SchemaVersion)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("migrating: %w", err)
+	}
+	defer tx.Rollback()
+	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("reading schema version: %w", err)
+	}
+	if version > SchemaVersion {
+		return fmt.Errorf("memory database schema version %d is newer than this trace-brain supports (%d); upgrade trace-brain", version, SchemaVersion)
+	}
+	for _, step := range migrations {
+		if step.version <= version {
+			continue
+		}
+		if err := step.apply(tx); err != nil {
+			return fmt.Errorf("migrating to schema %d (%s): %w", step.version, step.name, err)
+		}
+		// PRAGMA arguments cannot be bound; the version is a trusted integer.
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", step.version)); err != nil {
+			return fmt.Errorf("recording schema %d: %w", step.version, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// migrateBaseline creates the schema as it stood before versioning. Every
+// statement is idempotent, so it also completes pre-versioning databases that
+// were created by older releases and lack later tables, and it prunes
+// revisions beyond the retained window once.
+func migrateBaseline(tx *sql.Tx) error {
 	schema := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, scope TEXT NOT NULL, content TEXT NOT NULL,
   source TEXT, session_id TEXT, turn_id TEXT, created_at INTEGER NOT NULL);
@@ -166,8 +229,6 @@ DELETE FROM memory_revisions WHERE rowid IN (
   ) WHERE retention_rank > %d
 );
 `, maxMemoryRevisions, maxMemoryRevisions)
-	if _, err := db.Exec(schema); err != nil {
-		return fmt.Errorf("migrating: %w", err)
-	}
-	return nil
+	_, err := tx.Exec(schema)
+	return err
 }
