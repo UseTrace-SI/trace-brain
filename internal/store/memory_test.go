@@ -51,7 +51,7 @@ func TestRegressionMemoryIDsAreRandomAndUnique(t *testing.T) {
 	}
 }
 
-func TestLiteralQueryAndAtomicRemember(t *testing.T) {
+func TestLiteralSearchAndAtomicRemember(t *testing.T) {
 	db, err := Open(t.TempDir() + "/m.db")
 	if err != nil {
 		t.Fatal(err)
@@ -61,12 +61,7 @@ func TestLiteralQueryAndAtomicRemember(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, text := range []string{"auth-token", `auth "token"`, "中文", "", "!!!"} {
-		q, err := LiteralQuery(text)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var n int
-		if err = db.QueryRow("SELECT count(*) FROM memory_fts WHERE memory_fts MATCH ?", q).Scan(&n); err != nil {
+		if _, err := Search(context.Background(), db, SearchOpts{Query: text}); err != nil {
 			t.Fatalf("query %q: %v", text, err)
 		}
 	}

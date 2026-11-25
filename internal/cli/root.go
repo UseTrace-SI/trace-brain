@@ -139,8 +139,8 @@ func rememberCmd() *cobra.Command {
 
 func recallCmd() *cobra.Command {
 	return &cobra.Command{Use: "recall <query>", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		q, err := store.LiteralQuery(strings.Join(args, " "))
-		if err != nil {
+		query := strings.Join(args, " ")
+		if _, err := store.QueryTerms(query); err != nil {
 			return err
 		}
 		db, err := openDB()
@@ -148,22 +148,14 @@ func recallCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		rows, err := db.QueryContext(cmd.Context(), `SELECT m.id,m.scope,substr(m.content,1,2048),m.created_at FROM memories m
-			JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT 20`, q)
+		results, err := store.Search(cmd.Context(), db, store.SearchOpts{Query: query, Limit: 20})
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var id, scope, content string
-			var created int64
-			if err := rows.Scan(&id, &scope, &content, &created); err != nil {
-				return err
-			}
-			scope, content = readRedacted(scope, content)
-			fmt.Fprintf(cmd.OutOrStdout(), "[%s] %s: %s\n", id, scope, content)
+		for _, m := range results {
+			fmt.Fprintf(cmd.OutOrStdout(), "[%s] %s: %s\n", m.ID, m.Scope, m.Content)
 		}
-		return rows.Err()
+		return nil
 	}}
 }
 
@@ -190,7 +182,8 @@ func overviewCmd() *cobra.Command {
 
 func briefCmd() *cobra.Command {
 	return &cobra.Command{Use: "brief <task>", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		q, err := store.LiteralQuery(strings.Join(args, " "))
+		task := strings.Join(args, " ")
+		terms, err := store.QueryTerms(task)
 		if err != nil {
 			return err
 		}
@@ -199,20 +192,15 @@ func briefCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		rows, err := db.QueryContext(cmd.Context(), `SELECT substr(m.content,1,2048) FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT 10`, q)
+		results, err := store.Search(cmd.Context(), db, store.SearchOpts{Query: task, Limit: 10})
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		fmt.Fprintf(cmd.OutOrStdout(), "Brief for: %s\n", q)
-		for rows.Next() {
-			var c string
-			if err := rows.Scan(&c); err == nil {
-				_, c = readRedacted("", c)
-				fmt.Fprintf(cmd.OutOrStdout(), "- %s\n", c)
-			}
+		fmt.Fprintf(cmd.OutOrStdout(), "Brief for: %s\n", (redact.Redactor{}).Text(strings.Join(terms, " ")))
+		for _, m := range results {
+			fmt.Fprintf(cmd.OutOrStdout(), "- %s\n", m.Content)
 		}
-		return rows.Err()
+		return nil
 	}}
 }
 

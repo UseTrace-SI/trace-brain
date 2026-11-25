@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
@@ -67,11 +66,7 @@ type contextFact struct {
 
 const maxContextQuoteBytes = 256
 
-func contextFacts(cmd *cobra.Command, db *sql.DB, words []string, limit int, source string) ([]contextFact, bool, error) {
-	terms := make([]string, len(words))
-	for i, word := range words {
-		terms[i] = strings.Trim(word, `"`)
-	}
+func contextFacts(cmd *cobra.Command, db *sql.DB, terms []string, limit int, source string) ([]contextFact, bool, error) {
 	facts, truncated, err := store.ContextFacts(cmd.Context(), db, terms, limit, time.Now().UnixMilli(), source)
 	if err != nil {
 		return nil, false, err
@@ -178,14 +173,11 @@ func contextCmd(factory modelFactory) *cobra.Command {
 			limit = 20
 		}
 		// Treat ordinary task text as literal words, never as FTS syntax.
-		words := strings.FieldsFunc(query, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' })
-		if len(words) > 16 {
-			words = words[:16]
+		terms, err := store.QueryTerms(query)
+		if err != nil {
+			return err
 		}
-		for i := range words {
-			words[i] = `"` + words[i] + `"`
-		}
-		if strings.TrimSpace(query) != "" && len(words) == 0 {
+		if strings.TrimSpace(query) != "" && len(terms) == 0 {
 			out.Status = "ready"
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 		}
@@ -248,45 +240,18 @@ func contextCmd(factory modelFactory) *cobra.Command {
 				out.Memories = append(out.Memories, item)
 			}
 		} else {
-			q := `SELECT m.id,m.scope,substr(m.content,1,2048),COALESCE(m.source,''),COALESCE(m.session_id,''),COALESCE(m.turn_id,''),m.created_at FROM memories m`
-			var args []any
-			if len(words) > 0 {
-				q += ` JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ?`
-				args = append(args, strings.Join(words, " OR "))
-			} else {
-				q += ` WHERE 1=1`
-			}
-			if source != "" {
-				q += ` AND (m.source IN ('manual','mcp') OR EXISTS(SELECT 1 FROM memory_imports i WHERE i.memory_id=m.id AND i.source_db=?))`
-				args = append(args, source)
-			}
-			if len(words) > 0 {
-				q += ` ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT ?`
-			} else {
-				q += ` ORDER BY m.created_at DESC,m.id LIMIT ?`
-			}
-			args = append(args, limit)
-			rows, err := db.QueryContext(cmd.Context(), q, args...)
+			results, err := store.Search(cmd.Context(), db, store.SearchOpts{Query: query, SourceDB: source, Limit: limit, RecentWhenEmpty: true})
 			if err != nil {
 				return err
 			}
-			defer rows.Close()
-			for rows.Next() {
-				var item memoryItem
-				if err := rows.Scan(&item.ID, &item.Scope, &item.Content, &item.Source, &item.SessionID, &item.TurnID, &item.CreatedAt); err != nil {
-					return err
-				}
-				// Context output can be published by Trace; legacy or externally
-				// written rows must not bypass the read-time redaction policy.
-				item.Scope, item.Content = readRedacted(item.Scope, item.Content)
-				out.Memories = append(out.Memories, item)
-			}
-			if err := rows.Err(); err != nil {
-				return err
+			// Search re-applies read-time redaction: context output can be
+			// published by Trace, so legacy rows must not bypass the policy.
+			for _, m := range results {
+				out.Memories = append(out.Memories, memoryItem{ID: m.ID, Scope: m.Scope, Content: m.Content, Source: m.Source, SessionID: m.SessionID, TurnID: m.TurnID, CreatedAt: m.CreatedAt, ContentTruncated: m.ContentTruncated})
 			}
 		}
 		if factLimit > 0 {
-			if out.Facts, out.FactsTruncated, err = contextFacts(cmd, db, words, factLimit, source); err != nil {
+			if out.Facts, out.FactsTruncated, err = contextFacts(cmd, db, terms, factLimit, source); err != nil {
 				return err
 			}
 		}

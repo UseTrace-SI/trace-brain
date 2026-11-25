@@ -62,7 +62,7 @@ Run `go test -race -p 1 -count=1 ./...` for the full gate and `go test -race -co
 
 ## Production bounds
 
-Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline and keep at most 50 ranked candidates in memory. The existing context `--semantic` flag uses hashed word projections; it does not invoke a learned model. The separate explicit `embed` and `semantic` commands support learned vectors through a local Ollama service.
+Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline. Keyword reads fetch at most five times the requested limit (at most 250 candidates) and read content only for those candidates. The existing context `--semantic` flag uses hashed word projections; it does not invoke a learned model. The separate explicit `embed` and `semantic` commands support learned vectors through a local Ollama service.
 
 MCP recall/query return at most 50 memories with 2,048 bytes of content each (the same byte cap applies to CLI recall/query/brief); `history` caps each revised version at 2,048 runes and marks truncation explicitly. New manual/MCP memories are limited to 64 KiB after redaction and save their embedding atomically. Learned reads use a small connection pool so a long semantic scan cannot starve other MCP tools; writes remain serialized by IMMEDIATE transactions. Extraction caps stdout at 64 KiB and stderr at 4 KiB, cancels noisy subprocesses, and holds no memory-database transaction while waiting on an external agent. Successful extracted memories commit independently; an error leaves previous successful extractions intact for idempotent retry.
 
@@ -80,7 +80,14 @@ Read paths (recall/query/brief, context, workspace retrieval, dash, viz, get,
 history and every fact listing, query, graph and MCP fact tool) re-apply redaction
 to stored text, so a legacy row cannot bypass the current policy.
 
-Keyword retrieval ranks by SQLite FTS relevance with deterministic recency ties.
+Every keyword surface (CLI `recall`/`query`/`brief`, `context`, `workspace query`
+and the MCP recall/query/brief/search tools) uses one search path. It fetches
+five times the requested limit by SQLite FTS (BM25) relevance, then ranks by a
+blend of BM25 normalized against the best candidate (75%), recency with a
+30-day half-life (15%) and a fixed boost for manual/MCP notes (10%), with
+deterministic recency/ID ties. Near-duplicates (the same words ignoring case,
+punctuation and whitespace, compared over the 2,048-character snippet and the
+last 256 characters) are collapsed to the best-ranked copy.
 The optional hashed-word ranker omits zero-overlap results; it remains a lexical
 fallback. Quality regressions cover relevant older evidence outranking recent
 weak matches, changed extraction inputs, output redaction and deleted-source

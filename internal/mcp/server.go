@@ -37,14 +37,9 @@ func withToolDeadline(ctx context.Context, tool string) (context.Context, func(e
 
 func New(db *sql.DB) *Server { return &Server{DB: db} }
 
-// readRedacted re-applies redaction to stored scope/content on read. Write-time
-// redaction alone cannot protect legacy rows or rows written by other tools, so
-// these read paths mirror the policy already applied by store.Get.
-func readRedacted(scope, content string) (string, string) {
-	r := redact.Redactor{}
-	return r.Text(scope), r.Text(content)
-}
-
+// redactText re-applies redaction on read. Write-time redaction alone cannot
+// protect legacy rows or rows written by other tools; store.Search and
+// store.Get apply the same policy to memories.
 func redactText(text string) string { return (redact.Redactor{}).Text(text) }
 func NewServer(db *sql.DB) *mcp.Server {
 	return newServer(db, nil).server
@@ -117,33 +112,28 @@ type recallOutput struct {
 	Memories []map[string]any `json:"memories"`
 }
 
-func (s *Server) recall(ctx context.Context, req *mcp.CallToolRequest, in recallInput) (result *mcp.CallToolResult, out recallOutput, err error) {
-	ctx, finish := withToolDeadline(ctx, "brain_recall")
+func (s *Server) recall(ctx context.Context, req *mcp.CallToolRequest, in recallInput) (*mcp.CallToolResult, recallOutput, error) {
+	memories, err := s.keywordMemories(ctx, "brain_recall", in.Query, in.Limit)
+	return nil, recallOutput{Memories: memories}, err
+}
+
+// keywordMemories serves brain_recall and brain_query through store.Search,
+// keeping their historical id/scope/content/created_at result shape.
+func (s *Server) keywordMemories(ctx context.Context, tool, query string, limit int) (memories []map[string]any, err error) {
+	ctx, finish := withToolDeadline(ctx, tool)
 	defer func() { err = finish(err) }()
-	if in.Limit < 1 || in.Limit > 50 {
-		in.Limit = 20
+	if limit < 1 || limit > store.MaxSearchLimit {
+		limit = store.DefaultSearchLimit
 	}
-	query, err := store.LiteralQuery(in.Query)
+	results, err := store.Search(ctx, s.DB, store.SearchOpts{Query: query, Limit: limit})
 	if err != nil {
-		return nil, recallOutput{}, err
+		return nil, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT m.id,m.scope,substr(m.content,1,2048),m.created_at FROM memories m
-		JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT ?`, query, in.Limit)
-	if err != nil {
-		return nil, recallOutput{}, err
+	memories = []map[string]any{}
+	for _, m := range results {
+		memories = append(memories, map[string]any{"id": m.ID, "scope": m.Scope, "content": m.Content, "created_at": m.CreatedAt})
 	}
-	defer rows.Close()
-	memories := []map[string]any{}
-	for rows.Next() {
-		var id, scope, content string
-		var created int64
-		if err := rows.Scan(&id, &scope, &content, &created); err != nil {
-			return nil, recallOutput{}, err
-		}
-		scope, content = readRedacted(scope, content)
-		memories = append(memories, map[string]any{"id": id, "scope": scope, "content": content, "created_at": created})
-	}
-	return nil, recallOutput{Memories: memories}, rows.Err()
+	return memories, nil
 }
 
 type queryInput struct {
@@ -154,32 +144,9 @@ type queryOutput struct {
 	Memories []map[string]any `json:"memories"`
 }
 
-func (s *Server) query(ctx context.Context, req *mcp.CallToolRequest, in queryInput) (result *mcp.CallToolResult, out queryOutput, err error) {
-	ctx, finish := withToolDeadline(ctx, "brain_query")
-	defer func() { err = finish(err) }()
-	if in.Limit < 1 || in.Limit > 50 {
-		in.Limit = 20
-	}
-	query, err := store.LiteralQuery(in.Query)
-	if err != nil {
-		return nil, queryOutput{}, err
-	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT m.id,m.scope,substr(m.content,1,2048),m.created_at FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT ?`, query, in.Limit)
-	if err != nil {
-		return nil, queryOutput{}, err
-	}
-	defer rows.Close()
-	memories := []map[string]any{}
-	for rows.Next() {
-		var id, scope, content string
-		var created int64
-		if err := rows.Scan(&id, &scope, &content, &created); err != nil {
-			return nil, queryOutput{}, err
-		}
-		scope, content = readRedacted(scope, content)
-		memories = append(memories, map[string]any{"id": id, "scope": scope, "content": content, "created_at": created})
-	}
-	return nil, queryOutput{Memories: memories}, rows.Err()
+func (s *Server) query(ctx context.Context, req *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, queryOutput, error) {
+	memories, err := s.keywordMemories(ctx, "brain_query", in.Query, in.Limit)
+	return nil, queryOutput{Memories: memories}, err
 }
 
 type briefInput struct {
@@ -192,25 +159,15 @@ type briefOutput struct {
 func (s *Server) brief(ctx context.Context, req *mcp.CallToolRequest, in briefInput) (result *mcp.CallToolResult, out briefOutput, err error) {
 	ctx, finish := withToolDeadline(ctx, "brain_brief")
 	defer func() { err = finish(err) }()
-	query, err := store.LiteralQuery(in.Task)
+	results, err := store.Search(ctx, s.DB, store.SearchOpts{Query: in.Task, Limit: 10})
 	if err != nil {
 		return nil, briefOutput{}, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT substr(m.content,1,2048) FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT 10`, query)
-	if err != nil {
-		return nil, briefOutput{}, err
-	}
-	defer rows.Close()
 	items := []string{}
-	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			return nil, briefOutput{}, err
-		}
-		_, c = readRedacted("", c)
-		items = append(items, c)
+	for _, m := range results {
+		items = append(items, m.Content)
 	}
-	return nil, briefOutput{Items: items}, rows.Err()
+	return nil, briefOutput{Items: items}, nil
 }
 
 type overviewOutput struct {
