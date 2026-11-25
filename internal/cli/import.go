@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/UseTrace-SI/trace-brain/internal/embed"
+	"github.com/UseTrace-SI/trace-brain/internal/redact"
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 )
 
@@ -140,8 +141,8 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 			}
 		}
 		id := importMemoryID(path, source, kind, entityID)
-		if _, err := writeTx.ExecContext(ctx, `INSERT INTO memories(id,scope,content,source,session_id,turn_id,created_at) VALUES(?,?,?,?,?,?,?)
-ON CONFLICT(id) DO UPDATE SET content=excluded.content`, id, kind, content, source, sid, tid, time.Now().UnixMilli()); err != nil {
+		if _, err := writeTx.ExecContext(ctx, `INSERT INTO memories(id,scope,content,source,session_id,turn_id,created_at,content_hash) VALUES(?,?,?,?,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET content=excluded.content,content_hash=excluded.content_hash`, id, kind, content, source, sid, tid, time.Now().UnixMilli(), redact.Fingerprint(content)); err != nil {
 			return false, err
 		}
 		_, err = writeTx.ExecContext(ctx, `INSERT INTO memory_imports(source_db,source,entity_kind,entity_id,fingerprint,memory_id) VALUES(?,?,?,?,?,?)

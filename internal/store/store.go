@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/UseTrace-SI/trace-brain/internal/redact"
 	_ "modernc.org/sqlite"
 )
 
@@ -63,7 +64,7 @@ func Open(path string) (*sql.DB, error) {
 
 // SchemaVersion is the PRAGMA user_version written by this binary. Databases
 // created before schema versioning report 0 and are upgraded in place.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // migration upgrades a database from version-1 to version inside the single
 // IMMEDIATE transaction opened by migrate. Steps must be safe to apply to any
@@ -78,6 +79,7 @@ type migration struct {
 var migrations = []migration{
 	{1, "baseline schema", migrateBaseline},
 	{2, "porter-stemmed keyword index", migrateStemmedKeywordIndex},
+	{3, "stored content fingerprints", migrateContentHash},
 }
 
 // migrate brings the database to SchemaVersion. An up-to-date database needs
@@ -243,4 +245,80 @@ func migrateStemmedKeywordIndex(tx *sql.Tx) error {
 CREATE VIRTUAL TABLE memory_fts USING fts5(content, content='memories', content_rowid='rowid', tokenize='porter unicode61');
 INSERT INTO memory_fts(memory_fts) VALUES('rebuild');`)
 	return err
+}
+
+// migrateContentHash stores each memory's learned-embedding fingerprint
+// (redact.Fingerprint of its content) so learned search can compare cached
+// vectors in SQL instead of hashing every memory per query. Writers in this
+// package set it; a content change that does not also set it (an older
+// release or an external tool) clears it, and readers treat NULL as unknown
+// and verify the content themselves.
+func migrateContentHash(tx *sql.Tx) error {
+	// Tolerate a column that already exists (a database whose version was
+	// reset), so the step stays idempotent like the baseline.
+	var exists int
+	if err := tx.QueryRow("SELECT count(*) FROM pragma_table_info('memories') WHERE name='content_hash'").Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		if _, err := tx.Exec("ALTER TABLE memories ADD COLUMN content_hash TEXT"); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DROP TRIGGER IF EXISTS memories_au;
+CREATE TRIGGER memories_au AFTER UPDATE OF content ON memories BEGIN
+ INSERT INTO memory_fts(memory_fts,rowid,content) VALUES('delete',old.rowid,old.content);
+ INSERT INTO memory_fts(rowid,content) VALUES(new.rowid,new.content);
+END;
+DROP TRIGGER IF EXISTS memories_content_hash_reset;
+CREATE TRIGGER memories_content_hash_reset AFTER UPDATE OF content ON memories
+ WHEN new.content IS NOT old.content AND new.content_hash IS old.content_hash BEGIN
+ UPDATE memories SET content_hash=NULL WHERE rowid=new.rowid;
+END;`); err != nil {
+		return err
+	}
+	return backfillContentHashes(tx)
+}
+
+// backfillContentHashes fingerprints memories whose content_hash is NULL, in
+// rowid batches so no statement is open while rows are updated.
+func backfillContentHashes(tx *sql.Tx) error {
+	type pending struct {
+		rowid   int64
+		content sql.NullString
+	}
+	var last int64
+	for {
+		rows, err := tx.Query("SELECT rowid, content FROM memories WHERE rowid>? AND content_hash IS NULL ORDER BY rowid LIMIT 500", last)
+		if err != nil {
+			return err
+		}
+		batch := []pending{}
+		for rows.Next() {
+			var p pending
+			if err := rows.Scan(&p.rowid, &p.content); err != nil {
+				rows.Close()
+				return err
+			}
+			batch = append(batch, p)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		for _, p := range batch {
+			last = p.rowid
+			if !p.content.Valid {
+				continue
+			}
+			if _, err := tx.Exec("UPDATE memories SET content_hash=? WHERE rowid=?", redact.Fingerprint(p.content.String), p.rowid); err != nil {
+				return err
+			}
+		}
+	}
 }

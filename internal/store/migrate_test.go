@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/UseTrace-SI/trace-brain/internal/redact"
 )
 
 // testdata/schema-v0-memory.db was written by trace-brain at commit 3ec76fe
@@ -113,6 +115,29 @@ func TestMigrationUpgradesPreVersioningDatabaseWithoutDataLoss(t *testing.T) {
 	}
 	if _, err := db.Exec("INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')"); err != nil {
 		t.Fatalf("keyword index inconsistent after migration: %v", err)
+	}
+	// Every memory received the learned-embedding fingerprint of its content.
+	hashes, err := db.Query("SELECT content, content_hash FROM memories")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for hashes.Next() {
+		var content string
+		var hash sql.NullString
+		if err := hashes.Scan(&content, &hash); err != nil {
+			t.Fatal(err)
+		}
+		if !hash.Valid || hash.String != redact.Fingerprint(content) {
+			t.Fatalf("fingerprint not backfilled for %q: %v", content, hash)
+		}
+	}
+	if err := hashes.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture's cached vector still matches its memory after the upgrade.
+	var matching int
+	if err := db.QueryRow("SELECT count(*) FROM semantic_embeddings e JOIN memories m ON m.id=e.memory_id WHERE e.content_hash=m.content_hash").Scan(&matching); err != nil || matching != 1 {
+		t.Fatalf("cached vector no longer matches: %d %v", matching, err)
 	}
 	var ddl string
 	if err := db.QueryRow("SELECT sql FROM sqlite_master WHERE name='memory_fts'").Scan(&ddl); err != nil || !strings.Contains(ddl, "porter unicode61") {

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/UseTrace-SI/trace-brain/internal/redact"
 )
 
 func searchTestDB(t *testing.T) *sql.DB {
@@ -162,5 +164,48 @@ func TestSearchRedactsLegacyRowsOnRead(t *testing.T) {
 	results, err := Search(context.Background(), db, SearchOpts{Query: "lexicalterm", Now: searchNow})
 	if err != nil || len(results) != 1 || strings.Contains(results[0].Content, secret) || strings.Contains(results[0].Scope, secret) {
 		t.Fatalf("legacy secret returned: %+v %v", results, err)
+	}
+}
+
+func TestWritersMaintainContentFingerprint(t *testing.T) {
+	db := searchTestDB(t)
+	ctx := context.Background()
+	fingerprint := func(id string) (string, string) {
+		t.Helper()
+		var content string
+		var hash sql.NullString
+		if err := db.QueryRow("SELECT content, content_hash FROM memories WHERE id=?", id).Scan(&content, &hash); err != nil {
+			t.Fatal(err)
+		}
+		return hash.String, redact.Fingerprint(content)
+	}
+	if err := Remember(ctx, db, "m", "project", "first text", "manual", 1); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fingerprint("m"); got != want {
+		t.Fatalf("remember: %q want %q", got, want)
+	}
+	if err := Update(ctx, db, "m", "", "second text", 2); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fingerprint("m"); got != want {
+		t.Fatalf("update: %q want %q", got, want)
+	}
+	// Scope-only changes keep the fingerprint; content changes by writers
+	// that do not maintain it clear it.
+	if _, err := db.Exec("UPDATE memories SET scope='other' WHERE id='m'"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fingerprint("m"); got != want {
+		t.Fatalf("scope update cleared fingerprint: %q", got)
+	}
+	if _, err := db.Exec("UPDATE memories SET content='third text' WHERE id='m'"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := fingerprint("m"); got != "" {
+		t.Fatalf("external content change kept fingerprint %q", got)
+	}
+	if _, err := db.Exec("INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')"); err != nil {
+		t.Fatal(err)
 	}
 }

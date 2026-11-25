@@ -200,7 +200,7 @@ func Remember(ctx context.Context, db *sql.DB, id, scope, content, source string
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, "INSERT INTO memories(id,scope,content,source,created_at) VALUES(?,?,?,?,?)", id, scope, content, source, at); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO memories(id,scope,content,source,created_at,content_hash) VALUES(?,?,?,?,?,?)", id, scope, content, source, at, redact.Fingerprint(content)); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO embeddings(memory_id,dim,vector) VALUES(?,?,?)", id, embed.Dim, embed.Encode(embed.Embed(content))); err != nil {

@@ -159,8 +159,14 @@ CLI and MCP learned queries share scope filtering, identity checks and determini
 score/recency/ID ranking. Both have a one-minute deadline, a 4 KiB UTF-8 query limit,
 256-byte scope/provenance bounds, at most 100,000 scanned memories, 1–50 requested
 results, UTF-8-safe redacted 2 KiB content snippets and a 64 KiB encoded result
-budget. Content and result truncation are explicit. Oversized scans and malformed
-provenance fail without returning a partial ranking. The learned read reports
+budget. Content and result truncation are explicit. Oversized scans fail without
+returning a partial ranking. Each memory stores the fingerprint of its redacted
+content (schema 3, backfilled once on upgrade: about 0.5–2 s per 20,000 memories),
+so cached vectors are matched in SQL; only rows without a stored fingerprint and
+the rows about to be returned are read, re-verified and redacted. A content change
+by an external writer clears the stored fingerprint. A top-ranked memory whose
+provenance exceeds the output bounds or contains protected text is skipped and
+counted in `skipped_malformed` with a `warnings` entry instead of failing the query. The learned read reports
 `needs_embeddings` for a missing vector table without migrating it. Ordinary MCP
 startup retains its existing schema initialization and memory-write tools. Invalid and
 zero-norm stored vectors are stale. The MCP server admits one learned query at a

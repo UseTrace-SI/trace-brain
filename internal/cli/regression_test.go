@@ -53,6 +53,10 @@ CREATE TABLE turns(id TEXT,session_id TEXT,seq INTEGER,prompt TEXT,reasoning TEX
 	if err := db.QueryRow("SELECT count(*) FROM memory_fts WHERE memory_fts MATCH 'newword'").Scan(&n); err != nil || n != 1 {
 		t.Fatalf("missing FTS: %d %v", n, err)
 	}
+	// Imports and re-imports store the learned-embedding fingerprint.
+	if err := db.QueryRow("SELECT count(*) FROM memories WHERE content_hash IS NULL OR content_hash=''").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("imported memories without fingerprint: %d %v", n, err)
+	}
 	calls := filepath.Join(dir, "calls")
 	agent := "cat >/dev/null; echo call >> '" + calls + "'; echo extracted"
 	for i := 0; i < 2; i++ {
