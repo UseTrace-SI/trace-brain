@@ -80,9 +80,18 @@ Read paths (recall/query/brief, context, workspace retrieval, dash, viz, get,
 history and every fact listing, query, graph and MCP fact tool) re-apply redaction
 to stored text, so a legacy row cannot bypass the current policy.
 
+Keyword search stems English words (SQLite FTS5 `porter unicode61`), so `test`
+matches "tests" and `decide` matches "decided". Common stopwords ("the", "of",
+"what", …) are ignored unless a query has nothing else; negations such as
+"not" are kept. Memories containing every remaining word rank above memories
+matching only some of them. Schema 2 rebuilds the keyword index from stored
+memories on the first writable open; read-only commands against a database not
+yet upgraded keep using its unstemmed index.
+
 Every keyword surface (CLI `recall`/`query`/`brief`, `context`, `workspace query`
-and the MCP recall/query/brief/search tools) uses one search path. It fetches
-five times the requested limit by SQLite FTS (BM25) relevance, then ranks by a
+and the MCP recall/query/brief tools) uses one search path. It fills a window of
+five times the requested limit with all-word matches, then any-word matches,
+each by SQLite FTS (BM25) relevance. Within each tier it ranks by a
 blend of BM25 normalized against the best candidate (75%), recency with a
 30-day half-life (15%) and a fixed boost for manual/MCP notes (10%), with
 deterministic recency/ID ties. Near-duplicates (the same words ignoring case,

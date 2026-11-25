@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -112,6 +113,27 @@ func TestMigrationUpgradesPreVersioningDatabaseWithoutDataLoss(t *testing.T) {
 	}
 	if _, err := db.Exec("INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')"); err != nil {
 		t.Fatalf("keyword index inconsistent after migration: %v", err)
+	}
+	var ddl string
+	if err := db.QueryRow("SELECT sql FROM sqlite_master WHERE name='memory_fts'").Scan(&ddl); err != nil || !strings.Contains(ddl, "porter unicode61") {
+		t.Fatalf("keyword index not rebuilt with stemming: %q %v", ddl, err)
+	}
+	// Memories written by the previous release are found by stemmed words.
+	for query, want := range map[string]string{"test": "tests are flaky on CI", "decide": "We decided to keep migrations in Go code", "the database": "database backups run nightly at 02:00 UTC"} {
+		results, err := Search(context.Background(), db, SearchOpts{Query: query})
+		if err != nil || len(results) == 0 {
+			t.Fatalf("%q after upgrade: %v %v", query, results, err)
+		}
+		found := false
+		for _, r := range results {
+			found = found || r.Content == want
+			if strings.Contains(r.Content, "cat sat") {
+				t.Fatalf("%q matched a stopword-only memory", query)
+			}
+		}
+		if !found {
+			t.Fatalf("%q after upgrade missed %q: %+v", query, want, results)
+		}
 	}
 	// Triggers still maintain the index and revision cap after the upgrade.
 	if _, err := db.Exec("UPDATE memories SET content='upgraded keyword' WHERE content LIKE 'the cat%'"); err != nil {

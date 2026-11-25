@@ -63,7 +63,7 @@ func Open(path string) (*sql.DB, error) {
 
 // SchemaVersion is the PRAGMA user_version written by this binary. Databases
 // created before schema versioning report 0 and are upgraded in place.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // migration upgrades a database from version-1 to version inside the single
 // IMMEDIATE transaction opened by migrate. Steps must be safe to apply to any
@@ -77,6 +77,7 @@ type migration struct {
 
 var migrations = []migration{
 	{1, "baseline schema", migrateBaseline},
+	{2, "porter-stemmed keyword index", migrateStemmedKeywordIndex},
 }
 
 // migrate brings the database to SchemaVersion. An up-to-date database needs
@@ -230,5 +231,16 @@ DELETE FROM memory_revisions WHERE rowid IN (
 );
 `, maxMemoryRevisions, maxMemoryRevisions)
 	_, err := tx.Exec(schema)
+	return err
+}
+
+// migrateStemmedKeywordIndex rebuilds the external-content keyword index with
+// the Porter stemmer over unicode61, so "test" matches "tests" and "decide"
+// matches "decided". The index holds no data of its own: it is rebuilt from
+// memories, and the existing triggers keep maintaining it by name.
+func migrateStemmedKeywordIndex(tx *sql.Tx) error {
+	_, err := tx.Exec(`DROP TABLE IF EXISTS memory_fts;
+CREATE VIRTUAL TABLE memory_fts USING fts5(content, content='memories', content_rowid='rowid', tokenize='porter unicode61');
+INSERT INTO memory_fts(memory_fts) VALUES('rebuild');`)
 	return err
 }

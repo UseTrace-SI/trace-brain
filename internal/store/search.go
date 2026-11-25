@@ -75,18 +75,52 @@ type SearchResult struct {
 	ContentTruncated bool
 }
 
-// QueryTerms splits text into at most 16 literal words (letters, numbers and
-// underscores). Every other character separates words, so FTS syntax such as
-// quotes, operators, column filters and prefixes cannot be injected.
+// stopwords are dropped from queries: they match nearly every memory, so an
+// any-word search for "the database" would otherwise return "the cat sat".
+// Negations (no, not, never) are kept because they carry meaning.
+var stopwords = map[string]bool{}
+
+func init() {
+	for _, word := range strings.Fields(`a about above after again all also am an and any are as at be because been
+before being below between both but by can could did do does doing down during each few for from further had has
+have having he her here hers herself him himself his how i if in into is it its itself just me more most my myself
+of off on once only or other our ours ourselves out over own same she should so some such than that the their
+theirs them themselves then there these they this those through to too under until up very was we were what when
+where which while who whom why will with would you your yours yourself yourselves`) {
+		stopwords[word] = true
+	}
+}
+
+// QueryTerms splits text into at most 16 distinct literal words (letters,
+// numbers and underscores), dropping stopwords unless the query has nothing
+// else. Every other character separates words, so FTS syntax such as quotes,
+// operators, column filters and prefixes cannot be injected.
 func QueryTerms(text string) ([]string, error) {
 	if len(text) > MaxQueryBytes {
 		return nil, fmt.Errorf("query exceeds %d bytes", MaxQueryBytes)
 	}
 	words := strings.FieldsFunc(text, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' })
-	if len(words) > maxQueryTerms {
-		words = words[:maxQueryTerms]
+	terms, common := []string{}, []string{}
+	seen := map[string]bool{}
+	for _, word := range words {
+		folded := strings.ToLower(word)
+		if seen[folded] {
+			continue
+		}
+		seen[folded] = true
+		if stopwords[folded] {
+			common = append(common, word)
+		} else {
+			terms = append(terms, word)
+		}
 	}
-	return words, nil
+	if len(terms) == 0 {
+		terms = common
+	}
+	if len(terms) > maxQueryTerms {
+		terms = terms[:maxQueryTerms]
+	}
+	return terms, nil
 }
 
 func quoteTerms(terms []string) []string {
@@ -107,8 +141,9 @@ func anyTermQuery(terms []string) string {
 }
 
 // Search is the single keyword retrieval path for CLI, MCP and context reads.
-// It overfetches BM25 candidates, blends normalized relevance with recency
-// and a manual-note boost, removes near-duplicates and applies read-time
+// Memories containing every query word rank above partial matches; within a tier
+// it blends BM25 relevance (normalized over an overfetched candidate window)
+// with recency and a manual-note boost, removes near-duplicates and applies read-time
 // redaction to the returned scope and content.
 func Search(ctx context.Context, db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
 	terms, err := QueryTerms(opts.Query)
@@ -143,49 +178,30 @@ func Search(ctx context.Context, db *sql.DB, opts SearchOpts) ([]SearchResult, e
 		params = append(params, opts.SourceDB)
 	}
 	fetch := opts.Limit * searchOverfetch
-	// Candidates are ranked by rowid-only columns first; content is read only
-	// for the bounded window selected by the inner query.
-	var candidates string
-	var args []any
+	var found []searchCandidate
 	if len(terms) == 0 {
-		candidates = `SELECT m.rowid AS rid, 0.0 AS rank FROM memories m WHERE 1=1` + filter +
-			` ORDER BY m.created_at DESC, m.id LIMIT ?`
-		args = append(params, fetch)
+		found, err = searchCandidates(ctx, db, "", filter, params, nil, fetch, 0, opts.SnippetChars)
 	} else {
-		candidates = `SELECT m.rowid AS rid, bm25(memory_fts) AS rank FROM memory_fts JOIN memories m ON m.rowid=memory_fts.rowid
-			WHERE memory_fts MATCH ?` + filter + ` ORDER BY rank, m.created_at DESC, m.id LIMIT ?`
-		args = append(append([]any{anyTermQuery(terms)}, params...), fetch)
+		// Memories containing every word form the first tier. Only when that
+		// tier cannot fill the window are any-word matches added, excluding
+		// the rows already selected, so the cost stays near one OR query.
+		found, err = searchCandidates(ctx, db, strings.Join(quoteTerms(terms), " "), filter, params, nil, fetch, 1, opts.SnippetChars)
+		if err == nil && len(terms) > 1 && len(found) < fetch {
+			exclude := make([]any, len(found))
+			for i, c := range found {
+				exclude[i] = c.rowid
+			}
+			var partial []searchCandidate
+			partial, err = searchCandidates(ctx, db, anyTermQuery(terms), filter, params, exclude, fetch-len(found), 0, opts.SnippetChars)
+			found = append(found, partial...)
+		}
 	}
-	query := `WITH c AS (` + candidates + `)
-		SELECT c.rank, m.id, m.scope, substr(m.content,1,?), length(m.content)>?, substr(m.content,-?),
-		COALESCE(m.source,''), COALESCE(m.session_id,''), COALESCE(m.turn_id,''), m.created_at
-		FROM c JOIN memories m ON m.rowid=c.rid`
-	args = append(args, opts.SnippetChars, opts.SnippetChars, dedupTailChars)
-	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	type candidate struct {
-		SearchResult
-		relevance float64
-		tail      string
-	}
-	found := []candidate{}
 	best := 0.0
-	for rows.Next() {
-		var c candidate
-		var rank float64
-		if err := rows.Scan(&rank, &c.ID, &c.Scope, &c.Content, &c.ContentTruncated, &c.tail, &c.Source, &c.SessionID, &c.TurnID, &c.CreatedAt); err != nil {
-			return nil, err
-		}
-		// SQLite's bm25() is negative; larger magnitude is more relevant.
-		c.relevance = math.Max(0, -rank)
+	for _, c := range found {
 		best = math.Max(best, c.relevance)
-		found = append(found, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	now := opts.Now.UnixMilli()
 	for i := range found {
@@ -214,6 +230,9 @@ func Search(ctx context.Context, db *sql.DB, opts SearchOpts) ([]SearchResult, e
 			}
 			return a.ID < b.ID
 		}
+		if a.allTerms != b.allTerms {
+			return a.allTerms > b.allTerms
+		}
 		if a.Score != b.Score {
 			return a.Score > b.Score
 		}
@@ -238,6 +257,56 @@ func Search(ctx context.Context, db *sql.DB, opts SearchOpts) ([]SearchResult, e
 		}
 	}
 	return results, ctx.Err()
+}
+
+type searchCandidate struct {
+	SearchResult
+	rowid     int64
+	relevance float64 // -bm25(), larger is more relevant
+	allTerms  int     // 1 when every query word matched
+	tail      string
+}
+
+// searchCandidates selects up to limit memories matching the FTS expression
+// match (or the most recent ones when match is empty). Candidates are ranked
+// on index columns first; content is read only for the selected rows.
+func searchCandidates(ctx context.Context, db *sql.DB, match, filter string, params, exclude []any, limit, allTerms, snippetChars int) ([]searchCandidate, error) {
+	var candidates string
+	var args []any
+	if len(exclude) > 0 {
+		filter += " AND m.rowid NOT IN (" + strings.TrimSuffix(strings.Repeat("?,", len(exclude)), ",") + ")"
+		params = append(append([]any{}, params...), exclude...)
+	}
+	if match == "" {
+		candidates = `SELECT m.rowid AS rid, 0.0 AS rank FROM memories m WHERE 1=1` + filter + ` ORDER BY m.created_at DESC, m.id LIMIT ?`
+		args = append(append(args, params...), limit)
+	} else {
+		candidates = `SELECT m.rowid AS rid, bm25(memory_fts) AS rank FROM memory_fts JOIN memories m ON m.rowid=memory_fts.rowid
+			WHERE memory_fts MATCH ?` + filter + ` ORDER BY rank, m.created_at DESC, m.id LIMIT ?`
+		args = append(append(append(args, match), params...), limit)
+	}
+	query := `WITH c AS (` + candidates + `)
+		SELECT c.rid, c.rank, m.id, m.scope, substr(m.content,1,?), length(m.content)>?, substr(m.content,-?),
+		COALESCE(m.source,''), COALESCE(m.session_id,''), COALESCE(m.turn_id,''), m.created_at
+		FROM c JOIN memories m ON m.rowid=c.rid`
+	args = append(args, snippetChars, snippetChars, dedupTailChars)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	found := []searchCandidate{}
+	for rows.Next() {
+		c := searchCandidate{allTerms: allTerms}
+		var rank float64
+		if err := rows.Scan(&c.rowid, &rank, &c.ID, &c.Scope, &c.Content, &c.ContentTruncated, &c.tail, &c.Source, &c.SessionID, &c.TurnID, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		// SQLite's bm25() is negative; larger magnitude is more relevant.
+		c.relevance = math.Max(0, -rank)
+		found = append(found, c)
+	}
+	return found, rows.Err()
 }
 
 // dedupKey identifies near-duplicate memories: the same words, ignoring case,
