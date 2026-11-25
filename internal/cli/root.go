@@ -103,13 +103,13 @@ func buildVersion() string {
 }
 
 func versionCmd() *cobra.Command {
-	return &cobra.Command{Use: "version", Run: func(cmd *cobra.Command, args []string) {
+	return &cobra.Command{Use: "version", Short: "Print the trace-brain release version", Run: func(cmd *cobra.Command, args []string) {
 		fmt.Fprintln(cmd.OutOrStdout(), "trace-brain "+buildVersion())
 	}}
 }
 
 func statusCmd() *cobra.Command {
-	return &cobra.Command{Use: "status", RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "status", Short: "Print the number of stored memories", RunE: func(cmd *cobra.Command, args []string) error {
 		db, err := openDB()
 		if err != nil {
 			return err
@@ -126,7 +126,7 @@ func statusCmd() *cobra.Command {
 
 func rememberCmd() *cobra.Command {
 	var scope string
-	cmd := &cobra.Command{Use: "remember <content>", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "remember <content>", Short: "Save a local manual memory (redacted, up to 64 KiB) and print its ID", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		content := strings.Join(args, " ")
 		db, err := openDB()
 		if err != nil {
@@ -146,12 +146,14 @@ func rememberCmd() *cobra.Command {
 		fmt.Fprintf(cmd.OutOrStdout(), "remembered %s\n", id)
 		return nil
 	}}
+	cmd.Example = `  trace-brain remember "We decided to keep migrations in Go code"
+  trace-brain remember --scope internal/store "Open applies numbered schema migrations"`
 	cmd.Flags().StringVar(&scope, "scope", "", "memory scope path")
 	return cmd
 }
 
 func recallCmd() *cobra.Command {
-	return &cobra.Command{Use: "recall <query>", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "recall <query>", Short: "Search memories by keyword and print up to 20 ranked results", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		query := strings.Join(args, " ")
 		if _, err := store.QueryTerms(query); err != nil {
 			return err
@@ -170,16 +172,26 @@ func recallCmd() *cobra.Command {
 		}
 		return nil
 	}}
+	cmd.Long = `Search memories by keyword. Words are matched literally with English
+stemming ("test" finds "tests"); common stopwords are ignored; memories
+containing every word rank first, then by relevance, recency and a boost for
+manual notes. Near-duplicates are collapsed. Prints "[id] scope: content" with
+content capped at 2,048 characters.`
+	cmd.Example = `  trace-brain recall flaky tests
+  trace-brain recall "database migration"`
+	return cmd
 }
 
 func queryCmd() *cobra.Command {
 	cmd := recallCmd()
 	cmd.Use = "query <query>"
+	cmd.Short = "Alias of recall: search memories by keyword"
+	cmd.Example = `  trace-brain query retry policy`
 	return cmd
 }
 
 func overviewCmd() *cobra.Command {
-	return &cobra.Command{Use: "overview", RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "overview", Short: "Print a short summary of the memory database", RunE: func(cmd *cobra.Command, args []string) error {
 		db, err := openDB()
 		if err != nil {
 			return err
@@ -194,7 +206,7 @@ func overviewCmd() *cobra.Command {
 }
 
 func briefCmd() *cobra.Command {
-	return &cobra.Command{Use: "brief <task>", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "brief <task>", Short: "List up to 10 memories relevant to a task description", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		task := strings.Join(args, " ")
 		terms, err := store.QueryTerms(task)
 		if err != nil {
@@ -215,6 +227,8 @@ func briefCmd() *cobra.Command {
 		}
 		return nil
 	}}
+	cmd.Example = `  trace-brain brief "fix the flaky integration tests"`
+	return cmd
 }
 
 func setupCmd() *cobra.Command {
@@ -232,7 +246,7 @@ func setupCmd() *cobra.Command {
 }
 
 func dashCmd() *cobra.Command {
-	return &cobra.Command{Use: "dash", RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "dash", Short: "Print the memory count and the 10 most recent memories", RunE: func(cmd *cobra.Command, args []string) error {
 		db, err := openDB()
 		if err != nil {
 			return err
@@ -258,7 +272,7 @@ func dashCmd() *cobra.Command {
 }
 
 func vizCmd() *cobra.Command {
-	return &cobra.Command{Use: "viz", RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "viz", Short: "Write viz.html beside the database showing up to 1,000 recent memories", RunE: func(cmd *cobra.Command, args []string) error {
 		db, err := openDB()
 		if err != nil {
 			return err
@@ -291,7 +305,7 @@ func extractCmd() *cobra.Command {
 }
 
 func doctorCmd() *cobra.Command {
-	return &cobra.Command{Use: "doctor", RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "doctor", Short: "Open the memory database (creating it or applying pending schema migrations) and report ok", RunE: func(cmd *cobra.Command, args []string) error {
 		db, err := openDB()
 		if err != nil {
 			return fmt.Errorf("database: %w", err)

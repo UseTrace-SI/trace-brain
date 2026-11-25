@@ -2,6 +2,31 @@
 
 Continuous memory layer over Trace history.
 
+## Quickstart (5 minutes)
+
+```sh
+go build -o trace-brain ./cmd/trace-brain   # or use the binary shipped in the Trace bundle
+
+# In a project initialized with Trace (it has .trace/trace.db), memories live in
+# .trace/brain/memory.db; elsewhere in .trace-brain/memory.db. --db overrides both.
+./trace-brain setup                 # import Trace sessions and turns, extract facts
+./trace-brain status                # memories: N
+
+# Save and find notes. Search words are literal and stemmed: "decide" finds "decided".
+./trace-brain remember "We decided to keep migrations in Go code"
+./trace-brain recall decide
+./trace-brain brief "fix the flaky tests"
+./trace-brain context --query "flaky tests"   # protocol-1 JSON with provenance
+
+# Give an agent the memory tools over MCP stdio (brain_search, brain_remember, ...).
+# MCP clients may start servers in another directory, so pass an absolute --db:
+./trace-brain --db "$PWD/.trace/brain/memory.db" mcp
+```
+
+An MCP client entry looks like
+`{"command": "trace-brain", "args": ["--db", "/abs/project/.trace/brain/memory.db", "mcp"]}`.
+Run `trace-brain <command> --help` for flags and examples.
+
 Licensed under [Apache-2.0](LICENSE).
 
 The coordinated Trace bundle supplies this executable beside the other two
@@ -11,8 +36,8 @@ SQLite files and manual/MCP-authored Brain notes remain local. Graph snapshots
 describe the checkout when indexed, with their index timestamp.
 
 ## Commands
-- `trace-brain version`
-- `trace-brain status`
+- `trace-brain version` (release version)
+- `trace-brain status` (memory count)
 - `trace-brain remember <content> [--scope]`
 - `trace-brain get <id>`
 - `trace-brain update <id> <content> [--scope]`
@@ -23,12 +48,17 @@ describe the checkout when indexed, with their index timestamp.
 - `trace-brain embed --model EXACT_INSTALLED_MODEL [--endpoint LOCAL_ORIGIN]`
 - `trace-brain semantic <query> --model EXACT_INSTALLED_MODEL`
 - `trace-brain capabilities`
-- `trace-brain recall <query>`
-- `trace-brain query <query>`
+- `trace-brain recall <query>` (keyword search, up to 20 results)
+- `trace-brain query <query>` (alias of `recall`)
 - `trace-brain overview`
-- `trace-brain brief <task>`
+- `trace-brain brief <task>` (up to 10 relevant memories)
+- `trace-brain dash` (memory count and the 10 most recent memories)
+- `trace-brain viz` (writes `viz.html` beside the database)
 - `trace-brain setup [trace.db]` (import sessions from Trace)
-- `trace-brain doctor`
+- `trace-brain doctor` (opens the database, applying pending migrations)
+- `trace-brain extract [--agent CMD] [--trace-db PATH]` (per-session evidence memories, summarized by the agent command when one is given)
+- `trace-brain watch [--agent CMD] [--interval 60] [--daemon]` and `trace-brain stop` (periodic extraction)
+- `trace-brain documents sync --root DIR [--scope S] [--dry-run] [--prune]`, `documents list --root DIR`, `documents forget-source --root DIR` (see Local document sources)
 - `trace-brain mcp [--semantic-model EXACT_INSTALLED_MODEL] [--semantic-endpoint LOCAL_ORIGIN]` (MCP stdio server; learned search defaults off)
 - `trace-brain refresh [--trace-db .trace/trace.db]` (import, extract claims and return protocol-1 JSON)
 - `trace-brain facts [--subject S] [--at TIME] [--known-at TIME] [--history] [--json]` (current or historical claims)
