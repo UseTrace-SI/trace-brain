@@ -251,3 +251,14 @@ func TestUpdateWithMarkerOnlyChangeKeepsFingerprint(t *testing.T) {
 		t.Fatalf("fingerprint after marker-only update: %v %v", hash, err)
 	}
 }
+
+func TestSearchDedupIgnoresMarkerDigests(t *testing.T) {
+	db := searchTestDB(t)
+	insertMemory(t, db, "a", "project", "rotate deploy key ⟨redacted:env:11111111⟩ today", "manual", daysAgo(1))
+	insertMemory(t, db, "b", "project", "rotate deploy key ⟨redacted:env:22222222⟩ today", "manual", daysAgo(2))
+	insertMemory(t, db, "c", "project", "rotate deploy key ⟨redacted:github-token:33333333⟩ today", "manual", daysAgo(3))
+	results, err := Search(context.Background(), db, SearchOpts{Query: "rotate deploy", Now: searchNow})
+	if err != nil || strings.Join(resultIDs(results), ",") != "a,c" {
+		t.Fatalf("marker-digest-only duplicates not collapsed (different kinds kept): %v %v", resultIDs(results), err)
+	}
+}

@@ -325,7 +325,7 @@ func searchCandidates(ctx context.Context, db *sql.DB, match, filter string, par
 }
 
 // dedupKey identifies near-duplicate memories: the same scope and the same
-// text ignoring letter case and runs of whitespace, in the snippet and (for
+// text ignoring letter case, runs of whitespace and redaction-marker digests, in the snippet and (for
 // longer memories) the trailing text. Punctuation and symbols are kept, so
 // "x > y" and "x < y", "-1" and "1" or "C++" and "C" stay distinct.
 func dedupKey(scope, snippet, tail string, truncated bool) [32]byte {
@@ -337,5 +337,7 @@ func dedupKey(scope, snippet, tail string, truncated bool) [32]byte {
 }
 
 func normalizeForDedup(text string) string {
-	return strings.Join(strings.Fields(strings.ToLower(text)), " ")
+	// Marker digests depend on the marker key, so copies redacted under
+	// different keys are still duplicates.
+	return strings.Join(strings.Fields(strings.ToLower(redact.Canonical(text))), " ")
 }
