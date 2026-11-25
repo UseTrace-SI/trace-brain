@@ -23,7 +23,10 @@ func Embed(text string) []float32 {
 	for _, f := range fields {
 		h := fnv.New32a()
 		h.Write([]byte(f))
-		idx := int(h.Sum32()) % Dim
+		// Reduce in uint32 before converting: on 32-bit platforms int(Sum32())
+		// is negative for hashes above MaxInt32. On 64-bit platforms the
+		// bucket is unchanged, so stored vectors stay valid.
+		idx := int(h.Sum32() % Dim)
 		v[idx] += 1
 	}
 	// L2 normalize.
