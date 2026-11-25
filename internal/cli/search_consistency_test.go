@@ -88,3 +88,19 @@ func TestKeywordSurfacesShareOneRanking(t *testing.T) {
 		t.Fatalf("brief diverged: %q", brief)
 	}
 }
+
+func TestBriefHeaderDoesNotEchoSecretFragments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	secret := "sk-proj-" + strings.Repeat("Ab3dE5fG7hJ9kL1mN2pQ", 3)
+	var out bytes.Buffer
+	cmd := newRoot()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--db", path, "brief", "rotate", "api_key=" + secret})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "Ab3dE5fG7hJ9kL1mN2pQ") || strings.Contains(out.String(), "proj") || !strings.HasPrefix(out.String(), "Brief for: rotate api_key\n") {
+		t.Fatalf("brief echoed secret fragments: %q", out.String())
+	}
+}

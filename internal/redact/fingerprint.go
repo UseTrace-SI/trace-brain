@@ -44,3 +44,16 @@ func Canonical(text string) string {
 		return "⟨redacted:" + kind + "⟩"
 	})
 }
+
+// QueryText prepares user query text for searching and echoing: it is
+// redacted as a whole (so a secret is recognized before it is split into
+// words) and each marker is replaced by " … ", which contains no word
+// characters. A query that was only a secret stays non-blank but has no
+// words left to search.
+func QueryText(text string) string {
+	text = (Redactor{}).Text(text)
+	if !strings.Contains(text, "⟨redacted:") {
+		return text
+	}
+	return redactionMarker.ReplaceAllString(text, " … ")
+}

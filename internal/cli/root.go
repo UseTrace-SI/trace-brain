@@ -207,7 +207,12 @@ func overviewCmd() *cobra.Command {
 
 func briefCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "brief <task>", Short: "List up to 10 memories relevant to a task description", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		task := strings.Join(args, " ")
+		if raw := strings.Join(args, " "); len(raw) > store.MaxQueryBytes {
+			return fmt.Errorf("query exceeds %d bytes", store.MaxQueryBytes)
+		}
+		// The task is redacted as a whole before it is split into words: the
+		// header echoes the words, and a split secret is not recognizable.
+		task := redact.QueryText(strings.Join(args, " "))
 		terms, err := store.QueryTerms(task)
 		if err != nil {
 			return err
@@ -221,7 +226,7 @@ func briefCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Brief for: %s\n", (redact.Redactor{}).Text(strings.Join(terms, " ")))
+		fmt.Fprintf(cmd.OutOrStdout(), "Brief for: %s\n", strings.Join(terms, " "))
 		for _, m := range results {
 			fmt.Fprintf(cmd.OutOrStdout(), "- %s\n", m.Content)
 		}

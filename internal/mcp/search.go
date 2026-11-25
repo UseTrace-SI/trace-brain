@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/UseTrace-SI/trace-brain/internal/redact"
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -54,7 +55,8 @@ func parseSince(text string, now time.Time) (int64, error) {
 	var age time.Duration
 	if days, ok := strings.CutSuffix(text, "d"); ok {
 		n, err := strconv.ParseFloat(days, 64)
-		if err != nil || n < 0 || n > maxSinceAge.Hours()/24 {
+		// Written so NaN fails the range check too.
+		if err != nil || !(n >= 0 && n <= maxSinceAge.Hours()/24) {
 			return 0, fmt.Errorf("since must be an RFC3339 time or a relative age such as 90m, 36h or 7d")
 		}
 		age = time.Duration(n * float64(24*time.Hour))
@@ -84,16 +86,19 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn
 	if err != nil {
 		return nil, searchOutput{}, err
 	}
-	terms, err := store.QueryTerms(in.Query)
+	if len(in.Query) > store.MaxQueryBytes {
+		return nil, searchOutput{}, fmt.Errorf("query exceeds %d bytes", store.MaxQueryBytes)
+	}
+	// Redact the whole query before splitting it into words: a secret split
+	// into fragments is no longer recognizable, and terms are echoed back.
+	query := redact.QueryText(in.Query)
+	terms, err := store.QueryTerms(query)
 	if err != nil {
 		return nil, searchOutput{}, err
 	}
-	results, err := store.Search(ctx, s.DB, store.SearchOpts{Query: in.Query, Scope: in.Scope, Since: since, Limit: in.Limit, RecentWhenEmpty: true, Now: now})
+	results, err := store.Search(ctx, s.DB, store.SearchOpts{Query: query, Scope: in.Scope, Since: since, Limit: in.Limit, RecentWhenEmpty: true, Now: now})
 	if err != nil {
 		return nil, searchOutput{}, err
-	}
-	for i := range terms {
-		terms[i] = redactText(terms[i])
 	}
 	out = searchOutput{Terms: terms, Since: since, Memories: []searchMemory{}}
 	for _, m := range results {

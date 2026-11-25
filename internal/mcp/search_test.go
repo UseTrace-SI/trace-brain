@@ -174,9 +174,48 @@ func TestParseSince(t *testing.T) {
 			t.Fatalf("%q: %d %v want %d", text, got, err, expected)
 		}
 	}
-	for _, text := range []string{"soon", "-1h", "d", "-2d", "1000000d", "9999999h"} {
+	for _, text := range []string{"soon", "-1h", "d", "-2d", "1000000d", "9999999h", "NaNd", "nand", "+Infd", "-Infd", "Infd"} {
 		if _, err := parseSince(text, now); err == nil {
 			t.Fatalf("accepted %q", text)
 		}
+	}
+}
+
+// Terms are echoed to the client, so the query is redacted before it is
+// split: per-word redaction let fragments of a split secret through.
+func TestBrainSearchDoesNotEchoSecretFragments(t *testing.T) {
+	db, err := store.Open(t.TempDir() + "/m.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := store.Remember(context.Background(), db, "m", "project", "rotate the deploy credentials", "manual", 1); err != nil {
+		t.Fatal(err)
+	}
+	s := New(db)
+	secret := "sk-proj-" + strings.Repeat("Ab3dE5fG7hJ9kL1mN2pQ", 3)
+	for _, query := range []string{"deploy api_key=" + secret, "deploy " + secret} {
+		_, out, err := s.search(context.Background(), nil, searchInput{Query: query})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(out)
+		if strings.Contains(string(raw), "Ab3dE5fG7hJ9kL1mN2pQ") {
+			t.Fatalf("query %q echoed the secret: %s", query, raw)
+		}
+		for _, term := range out.Terms {
+			if term == "sk" || term == "proj" || strings.Contains(term, "Ab3d") {
+				t.Fatalf("query %q echoed secret fragment %q: %v", query, term, out.Terms)
+			}
+		}
+		if len(out.Memories) != 1 || out.Terms[0] != "deploy" {
+			t.Fatalf("search on the remaining words failed: %+v", out)
+		}
+	}
+	// A query that is only a secret searches nothing rather than listing
+	// recent memories.
+	_, out, err := s.search(context.Background(), nil, searchInput{Query: secret})
+	if err != nil || len(out.Memories) != 0 || len(out.Terms) != 0 {
+		t.Fatalf("secret-only query: %+v %v", out, err)
 	}
 }
