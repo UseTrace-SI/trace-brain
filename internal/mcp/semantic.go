@@ -35,10 +35,10 @@ func NewServerWithSemantic(db *sql.DB, model, endpoint string, factory semantic.
 }
 
 type semanticInput struct {
-	Query    string   `json:"query"`
-	Scope    string   `json:"scope,omitempty"`
-	Limit    int      `json:"limit,omitempty"`
-	MinScore *float64 `json:"min_score,omitempty"`
+	Query    string   `json:"query" jsonschema:"natural-language query (1–4096 bytes; redacted before local inference)"`
+	Scope    string   `json:"scope,omitempty" jsonschema:"exact memory scope filter"`
+	Limit    int      `json:"limit,omitempty" jsonschema:"maximum memories (1–50, default 20)"`
+	MinScore *float64 `json:"min_score,omitempty" jsonschema:"minimum cosine similarity (-1 to 1); omit to rank all valid vectors"`
 }
 
 func (options *semanticOptions) handler(db *sql.DB) func(context.Context, *mcp.CallToolRequest, semanticInput) (*mcp.CallToolResult, semantic.SearchResponse, error) {

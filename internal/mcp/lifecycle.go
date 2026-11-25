@@ -9,12 +9,12 @@ import (
 )
 
 type memoryID struct {
-	ID string `json:"id"`
+	ID string `json:"id" jsonschema:"memory ID as returned by brain_search or brain_remember"`
 }
 type updateInput struct {
-	ID      string `json:"id"`
-	Content string `json:"content"`
-	Scope   string `json:"scope,omitempty"`
+	ID      string `json:"id" jsonschema:"ID of a manual or MCP memory"`
+	Content string `json:"content" jsonschema:"replacement text (1–65536 bytes; secrets are redacted before storage)"`
+	Scope   string `json:"scope,omitempty" jsonschema:"new scope; omit to keep the current scope"`
 }
 type updateOutput struct {
 	ID      string `json:"id"`

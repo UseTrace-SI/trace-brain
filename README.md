@@ -64,7 +64,17 @@ Run `go test -race -p 1 -count=1 ./...` for the full gate and `go test -race -co
 
 Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline. Keyword reads fetch at most five times the requested limit (at most 250 candidates) and read content only for those candidates. The existing context `--semantic` flag uses hashed word projections; it does not invoke a learned model. The separate explicit `embed` and `semantic` commands support learned vectors through a local Ollama service.
 
-MCP recall/query return at most 50 memories with 2,048 bytes of content each (the same byte cap applies to CLI recall/query/brief); `history` caps each revised version at 2,048 runes and marks truncation explicitly. New manual/MCP memories are limited to 64 KiB after redaction and save their embedding atomically. Learned reads use a small connection pool so a long semantic scan cannot starve other MCP tools; writes remain serialized by IMMEDIATE transactions. Extraction caps stdout at 64 KiB and stderr at 4 KiB, cancels noisy subprocesses, and holds no memory-database transaction while waiting on an external agent. Successful extracted memories commit independently; an error leaves previous successful extractions intact for idempotent retry.
+The MCP server reports the binary's release version. Its preferred keyword tool is
+the read-only `brain_search` (`query`, `scope`, `since` as an RFC3339 time or a
+relative age such as `36h` or `7d`, `limit` 1–50). It returns the searched words and
+ranked memories with `source`, `session_id`, `turn_id`, `created_at`, `score` and
+`content_truncated`; an empty query lists recent memories. `brain_recall` and
+`brain_query` (and `brain_status`/`brain_overview`) remain as backward-compatible
+aliases with their original result shapes. Every tool has a description and
+input-schema descriptions, and read-only tools carry the MCP `readOnlyHint`
+annotation. Status/overview, like the other memory tools, have a two-second deadline.
+
+MCP recall/query return at most 50 memories with 2,048 characters of content each (the same cap applies to CLI recall/query/brief); `history` caps each revised version at 2,048 runes and marks truncation explicitly. New manual/MCP memories are limited to 64 KiB after redaction and save their embedding atomically. Learned reads use a small connection pool so a long semantic scan cannot starve other MCP tools; writes remain serialized by IMMEDIATE transactions. Extraction caps stdout at 64 KiB and stderr at 4 KiB, cancels noisy subprocesses, and holds no memory-database transaction while waiting on an external agent. Successful extracted memories commit independently; an error leaves previous successful extractions intact for idempotent retry.
 
 Production builds select Go 1.27.4 to include the patched certificate verifier. CI pins this compiler and runs Govulncheck. The language version remains Go 1.26. Existing runtime dependencies are pinned to their reviewed updates in go.mod/go.sum.
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -89,9 +90,21 @@ func openDB() (*sql.DB, error) {
 // Version is set by the coordinated Trace bundle build.
 var Version = "dev"
 
+// buildVersion is Version when the bundle build set it, otherwise the module
+// version recorded by `go install module@version`, otherwise "dev".
+func buildVersion() string {
+	if Version != "dev" {
+		return Version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return Version
+}
+
 func versionCmd() *cobra.Command {
 	return &cobra.Command{Use: "version", Run: func(cmd *cobra.Command, args []string) {
-		fmt.Fprintln(cmd.OutOrStdout(), "trace-brain "+Version)
+		fmt.Fprintln(cmd.OutOrStdout(), "trace-brain "+buildVersion())
 	}}
 }
 

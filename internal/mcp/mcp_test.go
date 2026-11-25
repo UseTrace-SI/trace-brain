@@ -61,6 +61,12 @@ func TestRegressionMCPMemoryToolsEnforceOwnDeadlines(t *testing.T) {
 		"brain_recall": func(ctx context.Context) error { _, _, err := s.recall(ctx, nil, recallInput{Query: "x"}); return err },
 		"brain_query":  func(ctx context.Context) error { _, _, err := s.query(ctx, nil, queryInput{Query: "x"}); return err },
 		"brain_brief":  func(ctx context.Context) error { _, _, err := s.brief(ctx, nil, briefInput{Task: "x"}); return err },
+		"brain_search": func(ctx context.Context) error { _, _, err := s.search(ctx, nil, searchInput{Query: "x"}); return err },
+		"brain_status": func(ctx context.Context) error { _, _, err := s.status(ctx, nil, struct{}{}); return err },
+		"brain_overview": func(ctx context.Context) error {
+			_, _, err := s.overview(ctx, nil, struct{}{})
+			return err
+		},
 	} {
 		start := time.Now()
 		err := call(parent)
