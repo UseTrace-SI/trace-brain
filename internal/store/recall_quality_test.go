@@ -82,3 +82,43 @@ func TestQueryTermsDropStopwordsAndDuplicates(t *testing.T) {
 		t.Fatalf("query terms not capped: %d", len(terms))
 	}
 }
+
+// Echoed words must be words that were searched, and never fragments of a
+// secret the redactor recognizes.
+func TestDisplayTermsAreSearchedWordsWithoutSecretFragments(t *testing.T) {
+	secret := "sk-proj-" + strings.Repeat("Ab3dE5fG7hJ9kL1mN2pQ", 3)
+	sixteen := "w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16"
+	for _, tc := range []struct{ query, want string }{
+		// The secret's words take three of the 16 searched slots, so only
+		// w1..w13 were searched and only those are echoed.
+		{secret + " " + sixteen, "w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13"},
+		// Stopword fallback: the searched words are the secret's fragments,
+		// none of which is echoed; "the" was not searched, so not echoed.
+		{"the " + secret, ""},
+		// Nothing here is a secret the redactor recognizes, so every searched
+		// word is echoed; with a real token the redactor replaces the whole
+		// header, so nothing is echoed.
+		{"Authorization: Bearer X", "Authorization Bearer X"},
+		{"Authorization: Bearer " + strings.Repeat("eyJhbGciOiJIUzI1NiJ9", 2), ""},
+		{"deploy api_key=" + secret, "deploy api_key"},
+		{"flaky tests", "flaky tests"},
+	} {
+		searched, err := QueryTerms(tc.query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shown := DisplayTerms(tc.query)
+		if got := strings.Join(shown, " "); got != tc.want {
+			t.Fatalf("%q: echoed %q, want %q (searched %v)", tc.query, got, tc.want, searched)
+		}
+		inSearch := map[string]bool{}
+		for _, term := range searched {
+			inSearch[term] = true
+		}
+		for _, term := range shown {
+			if !inSearch[term] || strings.Contains(secret, term) && len(term) > 2 {
+				t.Fatalf("%q: echoed %q that was not searched or is part of the secret", tc.query, term)
+			}
+		}
+	}
+}

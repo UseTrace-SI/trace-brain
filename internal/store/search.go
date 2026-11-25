@@ -103,18 +103,32 @@ func QueryTerms(text string) ([]string, error) {
 	return splitTerms(text), nil
 }
 
-// DisplayTerms returns the query words that are safe to echo back to a user
-// or client: the query is redacted as a whole before it is split, so no
-// fragment of a secret appears. Searching uses the raw words (QueryTerms):
-// the query is local and never stored, and redaction would also drop
-// ordinary identifiers that merely follow a key-like word. Callers check
-// the raw query's length first.
+// DisplayTerms returns the searched words (QueryTerms of the raw query) that
+// are safe to echo back to a user or client: only those whose folded form
+// also occurs as a word of the query redacted as a whole. The echo is
+// therefore always a subset of what was searched, and words the redactor
+// recognizes as (part of) a secret are left out. Searching itself uses the
+// raw words: the query is local and never stored, and redaction would also
+// drop ordinary identifiers that merely follow a key-like word. Callers
+// check the raw query's length first.
 func DisplayTerms(raw string) []string {
-	return splitTerms(redact.QueryText(raw))
+	safe := map[string]bool{}
+	for _, word := range strings.FieldsFunc(redact.QueryText(raw), isWordSeparator) {
+		safe[strings.ToLower(word)] = true
+	}
+	shown := []string{}
+	for _, term := range splitTerms(raw) {
+		if safe[strings.ToLower(term)] {
+			shown = append(shown, term)
+		}
+	}
+	return shown
 }
 
+func isWordSeparator(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' }
+
 func splitTerms(text string) []string {
-	words := strings.FieldsFunc(text, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' })
+	words := strings.FieldsFunc(text, isWordSeparator)
 	terms, common := []string{}, []string{}
 	seen := map[string]bool{}
 	for _, word := range words {

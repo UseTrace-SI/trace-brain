@@ -32,10 +32,9 @@ type searchMemory struct {
 }
 
 type searchOutput struct {
-	// Terms are the searched words after stopword removal, taken from the
-	// query redacted as a whole: words that redaction removes (secrets, and
-	// sometimes identifiers after a key-like word) are searched but not
-	// echoed.
+	// Terms are the searched words (after stopword removal) that also occur
+	// in the query redacted as a whole; words the redactor removes are
+	// searched but not echoed.
 	Terms    []string       `json:"terms"`
 	Since    int64          `json:"since,omitempty"`
 	Memories []searchMemory `json:"memories"`
