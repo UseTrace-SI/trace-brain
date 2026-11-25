@@ -129,7 +129,7 @@ memories on the first writable open; read-only commands against a database not
 yet upgraded keep using its unstemmed index.
 
 Every keyword surface (CLI `recall`/`query`/`brief`, `context`, `workspace query`
-and the MCP recall/query/brief tools) uses one search path. It fills a window of
+and the MCP `brain_search`/recall/query/brief tools) uses one search path. It fills a window of
 five times the requested limit with all-word matches, then any-word matches,
 each by SQLite FTS (BM25) relevance. Within each tier it ranks by a
 blend of BM25 normalized against the best candidate (75%), recency with a

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"path/filepath"
 	"time"
@@ -287,7 +288,7 @@ func backfillContentHashes(tx *sql.Tx) error {
 		rowid   int64
 		content sql.NullString
 	}
-	var last int64
+	last := int64(math.MinInt64)
 	for {
 		rows, err := tx.Query("SELECT rowid, content FROM memories WHERE rowid>? AND content_hash IS NULL ORDER BY rowid LIMIT 500", last)
 		if err != nil {

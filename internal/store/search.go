@@ -81,12 +81,13 @@ type SearchResult struct {
 var stopwords = map[string]bool{}
 
 func init() {
-	for _, word := range strings.Fields(`a about above after again all also am an and any are as at be because been
-before being below between both but by can could did do does doing down during each few for from further had has
-have having he her here hers herself him himself his how i if in into is it its itself just me more most my myself
-of off on once only or other our ours ourselves out over own same she should so some such than that the their
-theirs them themselves then there these they this those through to too under until up very was we were what when
-where which while who whom why will with would you your yours yourself yourselves`) {
+	// Closed-class function words only; words that can carry meaning in a
+	// developer note (down, up, out, over, only, more, ...) are kept.
+	for _, word := range strings.Fields(`a about after all also am an and any are as at be because been before being
+between both but by can could did do does doing during each for from had has have having he her here hers herself
+him himself his how i if in into is it its itself just me my myself of on or our ours ourselves she should so some
+such than that the their theirs them themselves then there these they this those through to until was we were what
+when where which while who whom why will with would you your yours yourself yourselves`) {
 		stopwords[word] = true
 	}
 }
