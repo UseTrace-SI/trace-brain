@@ -153,3 +153,32 @@ func TestMarkerKeyLockWaitIsBounded(t *testing.T) {
 		t.Fatalf("waited %s for a held lock", elapsed)
 	}
 }
+
+// Without the lock a damaged key is never repaired: moving it aside unlocked
+// could move a key another process has just published. The caller gets an
+// error (and falls back to a per-process key); the file is left in place.
+func TestDamagedKeyIsNotRepairedWithoutTheLock(t *testing.T) {
+	original := markerKeyLockWait
+	markerKeyLockWait = 50 * time.Millisecond
+	defer func() { markerKeyLockWait = original }()
+	dir := t.TempDir()
+	path := filepath.Join(dir, markerKeyFile)
+	if err := os.WriteFile(path, []byte("garbage\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockMarkerKey(path + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if key, err := loadMarkerKey(path); err == nil {
+		t.Fatalf("repaired a damaged key without the lock: %x", key)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "garbage\n" {
+		t.Fatalf("damaged key was moved or replaced without the lock: %q %v", data, err)
+	}
+	aside, _ := filepath.Glob(path + ".damaged-*")
+	if len(aside) != 0 {
+		t.Fatalf("moved a key aside without the lock: %v", aside)
+	}
+}

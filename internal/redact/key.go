@@ -97,8 +97,10 @@ func randomMarkerKey() []byte {
 // published first. Creation and repair are serialized by an advisory lock on
 // path+".lock": inside it the key is read again, and only a key that is still
 // damaged is moved aside (to a unique path+".damaged-<unixnano>") before a new
-// one is linked in its place. If the lock cannot be taken within a few
-// seconds, the same steps run unlocked, as before the lock existed.
+// one is linked in its place. If the lock cannot be taken within
+// markerKeyLockWait, a missing key is still published (link-first-wins never
+// replaces a key), but a damaged key is left alone and an error is returned,
+// so this process falls back to a per-process key.
 func loadMarkerKey(path string) ([]byte, error) {
 	key, err := readMarkerKey(path)
 	if err == nil {
@@ -108,16 +110,25 @@ func loadMarkerKey(path string) ([]byte, error) {
 		return nil, err
 	}
 	_ = os.MkdirAll(filepath.Dir(path), 0700) // publishMarkerKey reports failures.
-	if unlock, lockErr := lockMarkerKey(path + ".lock"); lockErr == nil {
-		defer unlock()
-		// Another process may have created or repaired the key meanwhile.
-		key, err = readMarkerKey(path)
-		if err == nil {
-			return key, nil
+	unlock, lockErr := lockMarkerKey(path + ".lock")
+	if lockErr != nil {
+		// Without the lock only a missing key may be published: link-first-wins
+		// never replaces a key. Repairing a damaged key unlocked could move aside
+		// a key another process has just published, so refuse; the caller then
+		// uses a per-process key.
+		if errors.Is(err, errDamagedMarkerKey) {
+			return nil, fmt.Errorf("marker key is damaged and its lock is unavailable: %w", lockErr)
 		}
-		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errDamagedMarkerKey) {
-			return nil, err
-		}
+		return publishMarkerKey(path)
+	}
+	defer unlock()
+	// Another process may have created or repaired the key meanwhile.
+	key, err = readMarkerKey(path)
+	if err == nil {
+		return key, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errDamagedMarkerKey) {
+		return nil, err
 	}
 	if errors.Is(err, errDamagedMarkerKey) {
 		// Keep the damaged file for inspection; never delete or overwrite a
@@ -170,7 +181,7 @@ func publishMarkerKey(path string) ([]byte, error) {
 
 // markerKeyLockWait bounds how long a process waits for another to finish
 // creating or repairing the key before it proceeds without the lock.
-var markerKeyLockWait = 5 * time.Second
+var markerKeyLockWait = 500 * time.Millisecond
 
 var errDamagedMarkerKey = errors.New("marker key is damaged")
 

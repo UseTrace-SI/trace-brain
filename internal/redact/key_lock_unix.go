@@ -12,7 +12,7 @@ import (
 // lockMarkerKey takes an exclusive advisory lock on the lock file at path,
 // creating it with mode 0600 without following a symlink, and returns the
 // function that releases it. It never blocks for longer than
-// markerKeyLockWait; callers fall back to unlocked creation on error.
+// markerKeyLockWait; on error callers may only publish a missing key.
 func lockMarkerKey(path string) (func(), error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
