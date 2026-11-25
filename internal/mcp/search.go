@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/UseTrace-SI/trace-brain/internal/redact"
 	"github.com/UseTrace-SI/trace-brain/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -33,7 +32,10 @@ type searchMemory struct {
 }
 
 type searchOutput struct {
-	// Terms are the literal words searched after stopword removal.
+	// Terms are the searched words after stopword removal, taken from the
+	// query redacted as a whole: words that redaction removes (secrets, and
+	// sometimes identifiers after a key-like word) are searched but not
+	// echoed.
 	Terms    []string       `json:"terms"`
 	Since    int64          `json:"since,omitempty"`
 	Memories []searchMemory `json:"memories"`
@@ -86,17 +88,14 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn
 	if err != nil {
 		return nil, searchOutput{}, err
 	}
-	if len(in.Query) > store.MaxQueryBytes {
-		return nil, searchOutput{}, fmt.Errorf("query exceeds %d bytes", store.MaxQueryBytes)
-	}
-	// Redact the whole query before splitting it into words: a secret split
-	// into fragments is no longer recognizable, and terms are echoed back.
-	query := redact.QueryText(in.Query)
-	terms, err := store.QueryTerms(query)
-	if err != nil {
+	// Search uses the raw words (the query is local and never stored); only
+	// the echoed terms are built from the query redacted as a whole, so they
+	// never carry a fragment of a secret.
+	if _, err := store.QueryTerms(in.Query); err != nil {
 		return nil, searchOutput{}, err
 	}
-	results, err := store.Search(ctx, s.DB, store.SearchOpts{Query: query, Scope: in.Scope, Since: since, Limit: in.Limit, RecentWhenEmpty: true, Now: now})
+	terms := store.DisplayTerms(in.Query)
+	results, err := store.Search(ctx, s.DB, store.SearchOpts{Query: in.Query, Scope: in.Scope, Since: since, Limit: in.Limit, RecentWhenEmpty: true, Now: now})
 	if err != nil {
 		return nil, searchOutput{}, err
 	}

@@ -100,6 +100,20 @@ func QueryTerms(text string) ([]string, error) {
 	if len(text) > MaxQueryBytes {
 		return nil, fmt.Errorf("query exceeds %d bytes", MaxQueryBytes)
 	}
+	return splitTerms(text), nil
+}
+
+// DisplayTerms returns the query words that are safe to echo back to a user
+// or client: the query is redacted as a whole before it is split, so no
+// fragment of a secret appears. Searching uses the raw words (QueryTerms):
+// the query is local and never stored, and redaction would also drop
+// ordinary identifiers that merely follow a key-like word. Callers check
+// the raw query's length first.
+func DisplayTerms(raw string) []string {
+	return splitTerms(redact.QueryText(raw))
+}
+
+func splitTerms(text string) []string {
 	words := strings.FieldsFunc(text, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' })
 	terms, common := []string{}, []string{}
 	seen := map[string]bool{}
@@ -121,7 +135,7 @@ func QueryTerms(text string) ([]string, error) {
 	if len(terms) > maxQueryTerms {
 		terms = terms[:maxQueryTerms]
 	}
-	return terms, nil
+	return terms
 }
 
 func quoteTerms(terms []string) []string {

@@ -96,7 +96,9 @@ Ordinary search text is interpreted as literal words, including punctuation. Con
 
 The MCP server reports the binary's release version. Its preferred keyword tool is
 the read-only `brain_search` (`query`, `scope`, `since` as an RFC3339 time or a
-relative age such as `36h` or `7d`, `limit` 1–50). It returns the searched words and
+relative age such as `36h` or `7d`, `limit` 1–50). It searches the query's literal words
+and echoes them after redacting the query as a whole (so no fragment of a secret is
+returned, though a word redaction removes is still searched). It returns
 ranked memories with `source`, `session_id`, `turn_id`, `created_at`, `score` and
 `content_truncated`; an empty query lists recent memories. `brain_recall` and
 `brain_query` (and `brain_status`/`brain_overview`) remain as backward-compatible

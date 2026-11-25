@@ -207,16 +207,13 @@ func overviewCmd() *cobra.Command {
 
 func briefCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "brief <task>", Short: "List up to 10 memories relevant to a task description", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if raw := strings.Join(args, " "); len(raw) > store.MaxQueryBytes {
-			return fmt.Errorf("query exceeds %d bytes", store.MaxQueryBytes)
-		}
-		// The task is redacted as a whole before it is split into words: the
-		// header echoes the words, and a split secret is not recognizable.
-		task := redact.QueryText(strings.Join(args, " "))
-		terms, err := store.QueryTerms(task)
-		if err != nil {
+		task := strings.Join(args, " ")
+		if _, err := store.QueryTerms(task); err != nil {
 			return err
 		}
+		// The header echoes words from the task redacted as a whole, so a
+		// split secret never appears; the search itself uses the raw words.
+		terms := store.DisplayTerms(task)
 		db, err := openDB()
 		if err != nil {
 			return err
