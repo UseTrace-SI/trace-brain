@@ -141,6 +141,12 @@ func contextCmd(factory modelFactory) *cobra.Command {
 			return err
 		}
 		defer db.Close()
+		// A read never migrates. A schema from a newer release fails the
+		// command (Trace reports the companion as failed) rather than being
+		// misread as ready.
+		if err := store.CheckReadableSchema(cmd.Context(), db); err != nil {
+			return err
+		}
 		if source == "" {
 			if _, err := os.Stat(".trace/trace.db"); err == nil {
 				source = ".trace/trace.db"

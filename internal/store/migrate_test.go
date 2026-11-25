@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -250,5 +251,22 @@ func TestMigrationRefingerprintsAfterRedactionVersionChange(t *testing.T) {
 	var hash string
 	if err := db.QueryRow("SELECT content_hash FROM memories WHERE id='m'").Scan(&hash); err != nil || hash != redact.Fingerprint(stored) {
 		t.Fatalf("fingerprint not recomputed: %q %v", hash, err)
+	}
+}
+
+func TestCheckReadableSchemaAcceptsOlderAndRefusesNewer(t *testing.T) {
+	raw, err := sql.Open("sqlite", copyFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if err := CheckReadableSchema(context.Background(), raw); err != nil {
+		t.Fatalf("pre-versioning database refused for reading: %v", err)
+	}
+	if _, err := raw.Exec(fmt.Sprintf("PRAGMA user_version=%d", SchemaVersion+1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckReadableSchema(context.Background(), raw); !errors.Is(err, ErrNewerSchema) {
+		t.Fatalf("newer schema accepted: %v", err)
 	}
 }

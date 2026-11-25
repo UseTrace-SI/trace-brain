@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -84,6 +85,23 @@ var migrations = []migration{
 	{4, "keyed-marker content fingerprints", migrateRefingerprint},
 }
 
+// ErrNewerSchema reports a database written by a newer release.
+var ErrNewerSchema = errors.New("memory database was written by a newer trace-brain; upgrade trace-brain")
+
+// CheckReadableSchema lets read-only opens, which never migrate, refuse a
+// database whose schema is newer than this binary understands instead of
+// misreading it. Older schemas stay readable.
+func CheckReadableSchema(ctx context.Context, db *sql.DB) error {
+	var version int
+	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("reading schema version: %w", err)
+	}
+	if version > SchemaVersion {
+		return fmt.Errorf("%w (schema %d, supported %d)", ErrNewerSchema, version, SchemaVersion)
+	}
+	return nil
+}
+
 // migrate brings the database to SchemaVersion. An up-to-date database needs
 // only a header read, so ordinary opens no longer rewrite schema objects or
 // prune revisions. Concurrent openers serialize on the IMMEDIATE transaction
@@ -97,7 +115,7 @@ func migrate(db *sql.DB) error {
 		return nil
 	}
 	if version > SchemaVersion {
-		return fmt.Errorf("memory database schema version %d is newer than this trace-brain supports (%d); upgrade trace-brain", version, SchemaVersion)
+		return fmt.Errorf("%w (schema %d, supported %d)", ErrNewerSchema, version, SchemaVersion)
 	}
 	tx, err := db.Begin()
 	if err != nil {
@@ -108,7 +126,7 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("reading schema version: %w", err)
 	}
 	if version > SchemaVersion {
-		return fmt.Errorf("memory database schema version %d is newer than this trace-brain supports (%d); upgrade trace-brain", version, SchemaVersion)
+		return fmt.Errorf("%w (schema %d, supported %d)", ErrNewerSchema, version, SchemaVersion)
 	}
 	for _, step := range migrations {
 		if step.version <= version {
