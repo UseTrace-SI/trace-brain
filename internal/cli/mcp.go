@@ -32,6 +32,7 @@ func mcpCmd(factory modelFactory) *cobra.Command {
 			return err
 		}
 		defer db.Close()
+		brainmcp.Version = buildVersion()
 		server := brainmcp.NewServer(db)
 		if model != "" {
 			server, err = brainmcp.NewServerWithSemantic(db, model, endpoint, factory)

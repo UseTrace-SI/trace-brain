@@ -11,15 +11,15 @@ import (
 )
 
 type factQueryInput struct {
-	Scope        string `json:"scope,omitempty"`
-	Subject      string `json:"subject,omitempty"`
-	Predicate    string `json:"predicate,omitempty"`
-	Object       string `json:"object,omitempty"`
-	At           *int64 `json:"at,omitempty"`
-	KnownAt      *int64 `json:"known_at,omitempty"`
-	Limit        int    `json:"limit,omitempty"`
-	IncludeStale bool   `json:"include_stale,omitempty"`
-	EvidenceMode string `json:"evidence_mode,omitempty"`
+	Scope        string `json:"scope,omitempty" jsonschema:"exact claim scope (default project)"`
+	Subject      string `json:"subject,omitempty" jsonschema:"exact subject filter"`
+	Predicate    string `json:"predicate,omitempty" jsonschema:"exact predicate filter, for example uses or depends_on"`
+	Object       string `json:"object,omitempty" jsonschema:"exact object filter"`
+	At           *int64 `json:"at,omitempty" jsonschema:"validity time in Unix milliseconds (default now)"`
+	KnownAt      *int64 `json:"known_at,omitempty" jsonschema:"recorded-knowledge time in Unix milliseconds (default now)"`
+	Limit        int    `json:"limit,omitempty" jsonschema:"maximum claims (1–50, default 20)"`
+	IncludeStale bool   `json:"include_stale,omitempty" jsonschema:"include claims whose current evidence changed"`
+	EvidenceMode string `json:"evidence_mode,omitempty" jsonschema:"current (default) checks today's evidence memory; captured requires the original captured copy"`
 }
 type factQueryOutput struct {
 	Result        store.FactResults `json:"result"`
@@ -57,9 +57,9 @@ func (s *Server) facts(ctx context.Context, _ *mcp.CallToolRequest, input factQu
 }
 
 type factEvidenceInput struct {
-	ID      string `json:"id"`
-	Scope   string `json:"scope,omitempty"`
-	KnownAt *int64 `json:"known_at,omitempty"`
+	ID      string `json:"id" jsonschema:"claim ID"`
+	Scope   string `json:"scope,omitempty" jsonschema:"exact claim scope (default project)"`
+	KnownAt *int64 `json:"known_at,omitempty" jsonschema:"recorded-knowledge time in Unix milliseconds (default now)"`
 }
 type factEvidenceOutput struct {
 	Evidence         store.FactEvidence `json:"evidence"`
@@ -88,11 +88,11 @@ func (s *Server) factEvidence(ctx context.Context, _ *mcp.CallToolRequest, input
 }
 
 type factHistoryInput struct {
-	Scope     string `json:"scope,omitempty"`
-	Subject   string `json:"subject"`
-	Predicate string `json:"predicate,omitempty"`
-	KnownAt   *int64 `json:"known_at,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
+	Scope     string `json:"scope,omitempty" jsonschema:"exact claim scope (default project)"`
+	Subject   string `json:"subject" jsonschema:"exact subject whose claims to list"`
+	Predicate string `json:"predicate,omitempty" jsonschema:"exact predicate filter"`
+	KnownAt   *int64 `json:"known_at,omitempty" jsonschema:"recorded-knowledge time in Unix milliseconds (default now)"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"maximum claims (1–50, default 20)"`
 }
 type factHistoryOutput struct {
 	Result        store.FactResults `json:"result"`

@@ -152,7 +152,8 @@ func TestDenseRedactionIsLinearAndComplete(t *testing.T) {
 	text := strings.Repeat(line, (2<<20)/len(line))
 	start := time.Now()
 	out := (Redactor{}).Text(text)
-	if elapsed := time.Since(start); elapsed > 10*time.Second*raceSlowdown {
+	// The absolute budget is enforced only by the ordinary (non-race) build.
+	if elapsed := time.Since(start); !raceEnabled && elapsed > 10*time.Second {
 		t.Fatalf("dense redaction took %s", elapsed)
 	}
 	if strings.Contains(out, "7dF2aQ9mR4xT8vL1pN6cY3zB5kH0sW2u") || strings.Count(out, "⟨redacted:entropy:") != strings.Count(text, "\n") {

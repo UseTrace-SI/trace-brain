@@ -218,7 +218,7 @@ func TestRegressionSemanticMCPBoundsConcurrencyAndReleasesCancelledQueries(t *te
 	go func() { _, _, err := handler(ctx, nil, semanticInput{Query: "automobile"}); done <- err }()
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second * raceSlowdown):
 		t.Fatal("query did not enter provider")
 	}
 	if _, _, err := handler(context.Background(), nil, semanticInput{Query: "automobile"}); err == nil || !strings.Contains(err.Error(), "already running") {

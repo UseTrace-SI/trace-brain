@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -242,7 +243,11 @@ func TestLearnedExtractionIsExplicitGroundedAndHoldsNoTransaction(t *testing.T) 
 	}
 	var generatedAt int64
 	fake.during = func() {
-		time.Sleep(5 * time.Millisecond)
+		// Model inference takes time: wait until the millisecond clock has
+		// advanced, so recording at commit is distinguishable from before.
+		for entered := time.Now().UnixMilli(); time.Now().UnixMilli() <= entered+1; {
+			runtime.Gosched()
+		}
 		generatedAt = time.Now().UnixMilli()
 		// No SQLite transaction is held while the model runs.
 		db, err := store.Open(path)
@@ -250,7 +255,7 @@ func TestLearnedExtractionIsExplicitGroundedAndHoldsNoTransaction(t *testing.T) 
 			t.Fatal(err)
 		}
 		defer db.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*raceSlowdown)
 		defer cancel()
 		if err := store.Remember(ctx, db, fmt.Sprintf("during-%d", len(fake.prompts)), "project", "written during inference", "manual", 1); err != nil {
 			t.Fatalf("inference blocked a writer: %v", err)

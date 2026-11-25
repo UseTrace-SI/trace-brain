@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/UseTrace-SI/trace-brain/internal/redact"
 )
 
 func documentInput(path, content string) DocumentInput {
@@ -37,6 +39,10 @@ func TestDocumentRefreshIsAtomicRedactedAndSourceIsolated(t *testing.T) {
 	}
 	if strings.Contains(content, "sk-abcdefghijklmnopqrstuvwxyz") || !strings.Contains(content, "redacted") {
 		t.Fatal("document was not redacted")
+	}
+	var hashed int
+	if err := db.QueryRow("SELECT count(*) FROM memories WHERE source='document' AND content_hash=?", redact.Fingerprint(content)).Scan(&hashed); err != nil || hashed != 1 {
+		t.Fatalf("document fingerprint not stored: %d %v", hashed, err)
 	}
 	if err := Update(ctx, db, id, "", "manual overwrite", 101); err == nil {
 		t.Fatal("document memory was editable as a manual note")

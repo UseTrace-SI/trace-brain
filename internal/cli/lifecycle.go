@@ -29,10 +29,18 @@ func openReadOnlyMemory(databasePath string) (*sql.DB, error) {
 	}
 	u := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro&_pragma=busy_timeout(2000)"}
 	db, err := sql.Open("sqlite", u.String())
-	if err == nil {
-		db.SetMaxOpenConns(1)
+	if err != nil {
+		return nil, err
 	}
-	return db, err
+	db.SetMaxOpenConns(1)
+	// Read-only opens never migrate; refuse a schema from a newer release.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := store.CheckReadableSchema(ctx, db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
 }
 
 func getCmd() *cobra.Command {

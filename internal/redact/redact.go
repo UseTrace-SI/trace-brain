@@ -1,8 +1,6 @@
 package redact
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"math"
 	"regexp"
 	"strings"
@@ -59,11 +57,6 @@ var email = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}
 var phone = regexp.MustCompile(`\b\+?[0-9][0-9 ()-]{8,}[0-9]\b`)
 var candidate = regexp.MustCompile(`[A-Za-z0-9_+/=-]{20,}`)
 var keyContext = regexp.MustCompile(`(?i)(key|secret|token|password|passwd|api)`)
-
-func marker(kind, value string) string {
-	h := sha256.Sum256([]byte(value))
-	return "⟨redacted:" + kind + ":" + hex.EncodeToString(h[:])[:8] + "⟩"
-}
 
 func (r Redactor) Text(s string) string {
 	if s == "" {

@@ -208,8 +208,9 @@ func TestRegressionMemoryRevisionRetentionIsBounded(t *testing.T) {
 	if err != nil || len(revisions) != 50 || revisions[0].Revision != 60 || revisions[len(revisions)-1].Revision != 11 {
 		t.Fatalf("wrong retained revisions: %d %+v %v", len(revisions), revisions, err)
 	}
-	// Simulate a database that accumulated revisions before the cap existed.
-	if _, err := db.Exec("DROP TRIGGER memory_revisions_cap"); err != nil {
+	// Simulate a database that accumulated revisions before the cap existed;
+	// such databases predate schema versioning (user_version 0).
+	if _, err := db.Exec("DROP TRIGGER memory_revisions_cap; PRAGMA user_version=0"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 61; i <= 70; i++ {

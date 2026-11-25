@@ -2,6 +2,31 @@
 
 Continuous memory layer over Trace history.
 
+## Quickstart (5 minutes)
+
+```sh
+go build -o trace-brain ./cmd/trace-brain   # or use the binary shipped in the Trace bundle
+
+# In a project initialized with Trace (it has .trace/trace.db), memories live in
+# .trace/brain/memory.db; elsewhere in .trace-brain/memory.db. --db overrides both.
+./trace-brain setup                 # import Trace sessions and turns, extract facts
+./trace-brain status                # memories: N
+
+# Save and find notes. Search words are literal and stemmed: "decide" finds "decided".
+./trace-brain remember "We decided to keep migrations in Go code"
+./trace-brain recall decide
+./trace-brain brief "fix the flaky tests"
+./trace-brain context --query "flaky tests"   # protocol-1 JSON with provenance
+
+# Give an agent the memory tools over MCP stdio (brain_search, brain_remember, ...).
+# MCP clients may start servers in another directory, so pass an absolute --db:
+./trace-brain --db "$PWD/.trace/brain/memory.db" mcp
+```
+
+An MCP client entry looks like
+`{"command": "trace-brain", "args": ["--db", "/abs/project/.trace/brain/memory.db", "mcp"]}`.
+Run `trace-brain <command> --help` for flags and examples.
+
 Licensed under [Apache-2.0](LICENSE).
 
 The coordinated Trace bundle supplies this executable beside the other two
@@ -11,8 +36,8 @@ SQLite files and manual/MCP-authored Brain notes remain local. Graph snapshots
 describe the checkout when indexed, with their index timestamp.
 
 ## Commands
-- `trace-brain version`
-- `trace-brain status`
+- `trace-brain version` (release version)
+- `trace-brain status` (memory count)
 - `trace-brain remember <content> [--scope]`
 - `trace-brain get <id>`
 - `trace-brain update <id> <content> [--scope]`
@@ -23,12 +48,17 @@ describe the checkout when indexed, with their index timestamp.
 - `trace-brain embed --model EXACT_INSTALLED_MODEL [--endpoint LOCAL_ORIGIN]`
 - `trace-brain semantic <query> --model EXACT_INSTALLED_MODEL`
 - `trace-brain capabilities`
-- `trace-brain recall <query>`
-- `trace-brain query <query>`
+- `trace-brain recall <query>` (keyword search, up to 20 results)
+- `trace-brain query <query>` (alias of `recall`)
 - `trace-brain overview`
-- `trace-brain brief <task>`
+- `trace-brain brief <task>` (up to 10 relevant memories)
+- `trace-brain dash` (memory count and the 10 most recent memories)
+- `trace-brain viz` (writes `viz.html` beside the database)
 - `trace-brain setup [trace.db]` (import sessions from Trace)
-- `trace-brain doctor`
+- `trace-brain doctor` (opens the database, applying pending migrations)
+- `trace-brain extract [--agent CMD] [--trace-db PATH]` (per-session evidence memories, summarized by the agent command when one is given)
+- `trace-brain watch [--agent CMD] [--interval 60] [--daemon]` and `trace-brain stop` (periodic extraction)
+- `trace-brain documents sync --root DIR [--scope S] [--dry-run] [--prune]`, `documents list --root DIR`, `documents forget-source --root DIR` (see Local document sources)
 - `trace-brain mcp [--semantic-model EXACT_INSTALLED_MODEL] [--semantic-endpoint LOCAL_ORIGIN]` (MCP stdio server; learned search defaults off)
 - `trace-brain refresh [--trace-db .trace/trace.db]` (import, extract claims and return protocol-1 JSON)
 - `trace-brain facts [--subject S] [--at TIME] [--known-at TIME] [--history] [--json]` (current or historical claims)
@@ -44,6 +74,8 @@ describe the checkout when indexed, with their index timestamp.
 
 In an initialized Trace project, new databases default to `.trace/brain/memory.db`. A pre-existing `.trace-brain/memory.db` is retained, and explicit `--db` overrides both. With the binary on the Trace daemon's `PATH`, CLI imports history after completed turns and sessions. `trace context` and MCP `get_context` combine these memories with history and Graph output. Manual memories remain local and survive refresh; another checkout rebuilds derived memories from recovered history. Context treats task words literally, caps results/content, and never creates a missing database or invokes extraction.
 
+The memory database records its schema in `PRAGMA user_version`. Opening a database applies any pending numbered migrations once, inside one IMMEDIATE transaction, and upgrades existing files in place without data loss; an up-to-date database is not rewritten on open. A database written by a newer release is refused rather than modified, by writable opens and by read-only commands alike: `context`, `get`, `history`, `verify`, fact reads and learned reads fail with an explicit error (Trace then reports the brain companion as failed), and `workspace query` reports that source as unavailable. Read-only commands never migrate; older schemas stay readable. An upgrade holds the IMMEDIATE write transaction for its whole duration (rebuilding the keyword index and re-fingerprinting every memory: roughly 0.5–2 s per 20,000 memories, about 7 s for 200,000), so concurrent writers and openers wait, up to SQLite's 30-second busy timeout, until the first open after an upgrade finishes.
+
 Database writers reserve their SQLite write transaction before reading import fingerprints, so concurrent manual saves and daemon refreshes wait rather than fail with a stale-snapshot lock. Concurrent first opens retry transient WAL initialization contention.
 
 `setup` imports sessions and turns transactionally. Repeating it updates the same source entities without creating new memories. Turn text is redacted before it is cut; if it exceeds the 64 KiB memory budget, the derived memory keeps its beginning and end around an explicit `bytes omitted` notice, and invalid UTF-8 is replaced, so one oversized turn never blocks the rest of the history. For turns over 512 KiB only the first and last 256 KiB (at line boundaries) are redacted and considered, which bounds the per-refresh cost while any secret overlapping the kept text is still redacted whole. `extract` skips unchanged sessions, including external agent calls, and reports failures. It re-checks the evidence fingerprint inside its write transaction after the agent runs, so a concurrent refresh cannot commit a stale extraction. Existing unlinked duplicates created by older versions are preserved. Refresh removes derived `trace-import` memories whose source entity was deleted; manual/MCP notes are retained.
@@ -52,17 +84,31 @@ Database writers reserve their SQLite write transaction before reading import fi
 
 `watch` holds a per-database lock and supports `--daemon`. `stop` sends a private, instance-specific request and waits for an acknowledgement; it never signals a PID. Legacy PID-only watcher records are rejected. Stop an old watcher through its original terminal before upgrading. Extraction commands have a 30-second timeout.
 
-Run `go test -race -p 1 -count=1 ./...` for the full gate and `go test -race -count=100 -run 'TestRegression|TestCompanion' -timeout=10m ./...` to repeat the regression cases, matching `.github/workflows/ci.yml`. macOS and Linux are supported.
+Run `go test -count=1 ./...` (which also enforces the absolute performance budgets), `go test -race -count=1 ./...` (liveness waits are scaled and absolute budgets skipped under the race detector) and `go test -race -count=100 -run 'TestRegression|TestCompanion' -timeout=30m ./...` to repeat the regression cases, matching `.github/workflows/ci.yml`. macOS and Linux are supported.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs pure Go builds, vet, race tests, and 100 repetitions of the regression cases on GitHub-hosted macOS and Linux runners for pushes, pull requests, and manual runs. The workflow has read-only repository access. Hosted execution begins after these changes are pushed.
+`.github/workflows/ci.yml` runs pure Go builds, vet, staticcheck, tests with and without the race detector, and 100 repetitions of the regression cases on GitHub-hosted macOS and Linux runners for pushes, pull requests, and manual runs. The workflow has read-only repository access. Hosted execution begins after these changes are pushed.
 
 ## Production bounds
 
-Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline and keep at most 50 ranked candidates in memory. The existing context `--semantic` flag uses hashed word projections; it does not invoke a learned model. The separate explicit `embed` and `semantic` commands support learned vectors through a local Ollama service.
+Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline. Keyword reads fetch at most five times the requested limit (at most 250 candidates) and read content only for those candidates. The existing context `--semantic` flag uses hashed word projections; it does not invoke a learned model. The separate explicit `embed` and `semantic` commands support learned vectors through a local Ollama service.
 
-MCP recall/query return at most 50 memories with 2,048 bytes of content each (the same byte cap applies to CLI recall/query/brief); `history` caps each revised version at 2,048 runes and marks truncation explicitly. New manual/MCP memories are limited to 64 KiB after redaction and save their embedding atomically. Learned reads use a small connection pool so a long semantic scan cannot starve other MCP tools; writes remain serialized by IMMEDIATE transactions. Extraction caps stdout at 64 KiB and stderr at 4 KiB, cancels noisy subprocesses, and holds no memory-database transaction while waiting on an external agent. Successful extracted memories commit independently; an error leaves previous successful extractions intact for idempotent retry.
+The MCP server reports the binary's release version. Its preferred keyword tool is
+the read-only `brain_search` (`query`, `scope`, `since` as an RFC3339 time or a
+relative age such as `36h` or `7d`, `limit` 1–50). It searches the query's literal words
+and echoes only the searched words that remain after redacting the query as a whole:
+fragments of secrets the redactor recognizes are not returned (secrets it does not
+recognize are; see Redaction markers for how rules differ between components), and
+words it removes are still searched. It returns
+ranked memories with `source`, `session_id`, `turn_id`, `created_at`, `score` and
+`content_truncated`; an empty query lists recent memories. `brain_recall` and
+`brain_query` (and `brain_status`/`brain_overview`) remain as backward-compatible
+aliases with their original result shapes. Every tool has a description and
+input-schema descriptions, and read-only tools carry the MCP `readOnlyHint`
+annotation. Status/overview, like the other memory tools, have a two-second deadline.
+
+MCP recall/query return at most 50 memories with 2,048 characters of content each (the same cap applies to CLI recall/query/brief); `history` caps each revised version at 2,048 runes and marks truncation explicitly. New manual/MCP memories are limited to 64 KiB after redaction and save their embedding atomically. Learned reads use a small connection pool so a long semantic scan cannot starve other MCP tools; writes remain serialized by IMMEDIATE transactions. Extraction caps stdout at 64 KiB and stderr at 4 KiB, cancels noisy subprocesses, and holds no memory-database transaction while waiting on an external agent. Successful extracted memories commit independently; an error leaves previous successful extractions intact for idempotent retry.
 
 Production builds select Go 1.27.4 to include the patched certificate verifier. CI pins this compiler and runs Govulncheck. The language version remains Go 1.26. Existing runtime dependencies are pinned to their reviewed updates in go.mod/go.sum.
 
@@ -78,11 +124,69 @@ Read paths (recall/query/brief, context, workspace retrieval, dash, viz, get,
 history and every fact listing, query, graph and MCP fact tool) re-apply redaction
 to stored text, so a legacy row cannot bypass the current policy.
 
-Keyword retrieval ranks by SQLite FTS relevance with deterministic recency ties.
+Keyword search stems English words (SQLite FTS5 `porter unicode61`), so `test`
+matches "tests" and `decide` matches "decided". Common stopwords ("the", "of",
+"what", …) are ignored unless a query has nothing else; negations such as
+"not" are kept. Memories containing every remaining word rank above memories
+matching only some of them. Schema 2 rebuilds the keyword index from stored
+memories on the first writable open; read-only commands against a database not
+yet upgraded keep using its unstemmed index.
+
+Every keyword surface (CLI `recall`/`query`/`brief`, `context`, `workspace query`
+and the MCP `brain_search`/recall/query/brief tools) uses one search path. It fills a window of
+five times the requested limit with all-word matches, then any-word matches,
+each by SQLite FTS (BM25) relevance. Within each tier it ranks by a
+blend of BM25 normalized against the best candidate (75%), recency with a
+30-day half-life (15%) and a fixed boost for manual/MCP notes (10%), with
+deterministic recency/ID ties. Near-duplicates (the same scope and the same text,
+compared over the 2,048-character snippet and the last 256 characters, ignoring only
+letter case, whitespace and redaction-marker digests) are collapsed to the best-ranked
+copy. Memories that differ only in a redacted secret of the same kind at the same
+position are therefore merged too. Punctuation and symbols are significant, so
+"x > y" and "x < y" stay distinct.
 The optional hashed-word ranker omits zero-overlap results; it remains a lexical
 fallback. Quality regressions cover relevant older evidence outranking recent
 weak matches, changed extraction inputs, output redaction and deleted-source
 cleanup. Source/session/turn provenance remains present in context responses.
+
+## Redaction markers
+
+A redacted value is replaced by `⟨redacted:KIND:XXXXXXXX⟩`, where the digits are
+an HMAC-SHA256 of the value under a per-install key. trace-brain shares the Trace
+CLI's key file, `$TRACE_HOME/redaction.key` (an absolute `TRACE_HOME`) or
+`~/.trace/redaction.key`, and its creation rules: a missing or damaged key is
+created as a 0600 file in a 0700 directory and published with a hard link, so
+concurrent first runs of any Trace component agree on one key. Creation and repair
+run under an advisory lock (`redaction.key.lock`, waited on for at most half a second;
+without it a missing key is still published, but a damaged key is left for a process
+that holds the lock and this process uses a per-process key); a damaged key is moved aside to its own
+`redaction.key.damaged-<unixnano>` file and never overwritten in place, so earlier
+damaged copies are kept; a symlink or other non-regular file is never used as the key
+or followed as the lock; a group/world-readable key is tightened to 0600.
+A marker no longer confirms a guessed secret, and when trace-brain and the Trace CLI
+detect the same span of text with the same rule kind they produce the same marker.
+Their detection rules are not yet shared, however: the rule sets, minimum lengths and
+what a rule includes in the hashed value (for example surrounding quotes or a label
+name) differ, so the same secret can still be redacted with a different marker, or
+redacted by only one component. Aligning the rules in a shared module is follow-up
+work. `trace-brain doctor` reports which key is in use.
+
+If the shared key cannot be read or created, markers use an ephemeral per-process
+key (still unguessable, but not equal across processes). Nothing that is compared
+over time depends on marker digests: learned-vector fingerprints (`content_hash`)
+and Trace import change detection compare redacted text with marker digests
+elided, so a missing key never makes fingerprints stale or re-imports history.
+Document refresh compares exact chunks, so with an ephemeral key, document chunks
+containing secrets are rewritten on each `documents sync`.
+
+Schema 4 (redaction algorithm `redact-v3`) recomputes every stored fingerprint, so
+learned vectors cached by earlier releases are reported stale until the next
+`embed` run. Memories already stored keep the unkeyed markers written by earlier
+releases: manual/MCP notes, revisions, captured fact evidence and document chunks
+are not rewritten. Derived Trace memories that contain a secret are re-imported
+once by the next refresh and then carry keyed markers; claims citing them as
+current evidence are re-extracted or reported stale like any other source change.
+Use `update` or `forget` to replace old markers in a manual note.
 
 ## Memory lifecycle and workspace retrieval
 
@@ -131,8 +235,16 @@ CLI and MCP learned queries share scope filtering, identity checks and determini
 score/recency/ID ranking. Both have a one-minute deadline, a 4 KiB UTF-8 query limit,
 256-byte scope/provenance bounds, at most 100,000 scanned memories, 1–50 requested
 results, UTF-8-safe redacted 2 KiB content snippets and a 64 KiB encoded result
-budget. Content and result truncation are explicit. Oversized scans and malformed
-provenance fail without returning a partial ranking. The learned read reports
+budget. Content and result truncation are explicit. Oversized scans fail without
+returning a partial ranking. Each memory stores the fingerprint of its redacted
+content (schema 3, backfilled once on upgrade: about 0.5–2 s per 20,000 memories),
+so cached vectors are matched in SQL; only rows without a stored fingerprint and
+the rows about to be returned are read, re-verified and redacted. A content change
+by an external writer clears the stored fingerprint; trace-brain's own writers set it
+again even when only marker digests changed, and schema 5 restores fingerprints that
+earlier builds of this branch left cleared. A top-ranked memory whose
+provenance exceeds the output bounds or contains protected text is skipped and
+counted in `skipped_malformed` with a `warnings` entry instead of failing the query. The learned read reports
 `needs_embeddings` for a missing vector table without migrating it. Ordinary MCP
 startup retains its existing schema initialization and memory-write tools. Invalid and
 zero-norm stored vectors are stale. The MCP server admits one learned query at a

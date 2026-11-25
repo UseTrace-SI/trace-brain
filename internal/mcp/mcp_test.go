@@ -51,7 +51,7 @@ func TestRegressionMCPMemoryToolsEnforceOwnDeadlines(t *testing.T) {
 	defer holder.ExecContext(context.Background(), "ROLLBACK")
 
 	s := New(db)
-	parent, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	parent, cancel := context.WithTimeout(context.Background(), 3*time.Second*raceSlowdown)
 	defer cancel()
 	for name, call := range map[string]func(context.Context) error{
 		"brain_remember": func(ctx context.Context) error {
@@ -61,13 +61,19 @@ func TestRegressionMCPMemoryToolsEnforceOwnDeadlines(t *testing.T) {
 		"brain_recall": func(ctx context.Context) error { _, _, err := s.recall(ctx, nil, recallInput{Query: "x"}); return err },
 		"brain_query":  func(ctx context.Context) error { _, _, err := s.query(ctx, nil, queryInput{Query: "x"}); return err },
 		"brain_brief":  func(ctx context.Context) error { _, _, err := s.brief(ctx, nil, briefInput{Task: "x"}); return err },
+		"brain_search": func(ctx context.Context) error { _, _, err := s.search(ctx, nil, searchInput{Query: "x"}); return err },
+		"brain_status": func(ctx context.Context) error { _, _, err := s.status(ctx, nil, struct{}{}); return err },
+		"brain_overview": func(ctx context.Context) error {
+			_, _, err := s.overview(ctx, nil, struct{}{})
+			return err
+		},
 	} {
 		start := time.Now()
 		err := call(parent)
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("%s did not enforce its own deadline: %v", name, err)
 		}
-		if elapsed := time.Since(start); elapsed > time.Second {
+		if elapsed := time.Since(start); elapsed > time.Second*raceSlowdown { // far below the 30 s busy timeout
 			t.Fatalf("%s stalled for %s instead of its own deadline", name, elapsed)
 		}
 	}
@@ -159,7 +165,7 @@ func TestConcurrentSemanticScanDoesNotBlockBrainRemember(t *testing.T) {
 		t.Fatal("expected a seed row for the simulated scan")
 	}
 
-	writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second*raceSlowdown)
 	defer cancel()
 	res, err := clientSession.CallTool(writeCtx, &mcp.CallToolParams{Name: "brain_remember", Arguments: map[string]any{"content": "written during scan"}})
 	if err != nil || res.IsError {

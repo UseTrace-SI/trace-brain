@@ -35,8 +35,8 @@ func workspaceCmd() *cobra.Command {
 		if limit < 1 || limit > 50 {
 			return fmt.Errorf("limit must be 1–50")
 		}
-		q, err := store.LiteralQuery(strings.Join(args, " "))
-		if err != nil {
+		text := strings.Join(args, " ")
+		if _, err := store.QueryTerms(text); err != nil {
 			return err
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
@@ -48,7 +48,7 @@ func workspaceCmd() *cobra.Command {
 			if len(path) > 4096 {
 				return fmt.Errorf("database path exceeds 4096 bytes")
 			}
-			path, err = filepath.Abs(path)
+			path, err := filepath.Abs(path)
 			if err != nil {
 				return err
 			}
@@ -66,35 +66,13 @@ func workspaceCmd() *cobra.Command {
 				sources = append(sources, source)
 				continue
 			}
-			query := `SELECT m.id,m.scope,substr(m.content,1,2048),COALESCE(m.source,''),COALESCE(m.session_id,''),COALESCE(m.turn_id,''),m.created_at FROM memories m JOIN memory_fts f ON f.rowid=m.rowid WHERE memory_fts MATCH ?`
-			params := []any{q}
-			if scope != "" {
-				query += " AND m.scope=?"
-				params = append(params, scope)
-			}
-			query += " ORDER BY bm25(memory_fts),m.created_at DESC,m.id LIMIT ?"
-			params = append(params, limit)
-			rows, err := db.QueryContext(ctx, query, params...)
-			if err != nil {
-				db.Close()
-				source.Status = "unavailable"
-				sources = append(sources, source)
-				continue
-			}
+			results, err := store.Search(ctx, db, store.SearchOpts{Query: text, Scope: scope, Limit: limit})
+			db.Close()
 			ranked := []workspaceMemory{}
-			for rows.Next() {
-				var item memoryItem
-				if err = rows.Scan(&item.ID, &item.Scope, &item.Content, &item.Source, &item.SessionID, &item.TurnID, &item.CreatedAt); err != nil {
-					break
-				}
-				item.Scope, item.Content = readRedacted(item.Scope, item.Content)
+			for _, m := range results {
+				item := memoryItem{ID: m.ID, Scope: m.Scope, Content: m.Content, Source: m.Source, SessionID: m.SessionID, TurnID: m.TurnID, CreatedAt: m.CreatedAt}
 				ranked = append(ranked, workspaceMemory{Database: path, Rank: len(ranked) + 1, memoryItem: item})
 			}
-			if err == nil {
-				err = rows.Err()
-			}
-			rows.Close()
-			db.Close()
 			if err != nil {
 				source.Status = "unavailable"
 			} else {

@@ -190,7 +190,8 @@ func TestLegacyClaimsAreNotInventedOrBackfilledAndTamperedCapturesFailClosed(t *
 	if err != nil || len(captured.Facts) != 0 || captured.EvidenceUnavailableOmitted != 1 {
 		t.Fatalf("missing capture: %+v %v", captured, err)
 	}
-	if _, err := db.Exec("DROP TABLE fact_evidence"); err != nil {
+	// A database from before evidence capture has no table and schema version 0.
+	if _, err := db.Exec("DROP TABLE fact_evidence; PRAGMA user_version=0"); err != nil {
 		t.Fatal(err)
 	}
 	current, err := QueryFacts(ctx, db, FactQuery{Scope: "project", At: 3, KnownAt: 3, Limit: 10})

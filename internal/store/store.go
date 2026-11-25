@@ -1,13 +1,16 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"path/filepath"
 	"time"
 
+	"github.com/UseTrace-SI/trace-brain/internal/redact"
 	_ "modernc.org/sqlite"
 )
 
@@ -61,7 +64,91 @@ func Open(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// SchemaVersion is the PRAGMA user_version written by this binary. Databases
+// created before schema versioning report 0 and are upgraded in place.
+const SchemaVersion = 5
+
+// migration upgrades a database from version-1 to version inside the single
+// IMMEDIATE transaction opened by migrate. Steps must be safe to apply to any
+// database that reached the previous version, including pre-versioning files
+// written by older releases.
+type migration struct {
+	version int
+	name    string
+	apply   func(*sql.Tx) error
+}
+
+var migrations = []migration{
+	{1, "baseline schema", migrateBaseline},
+	{2, "porter-stemmed keyword index", migrateStemmedKeywordIndex},
+	{3, "stored content fingerprints", migrateContentHash},
+	{4, "keyed-marker content fingerprints", migrateRefingerprint},
+	{5, "restore cleared content fingerprints", backfillContentHashes},
+}
+
+// ErrNewerSchema reports a database written by a newer release.
+var ErrNewerSchema = errors.New("memory database was written by a newer trace-brain; upgrade trace-brain")
+
+// CheckReadableSchema lets read-only opens, which never migrate, refuse a
+// database whose schema is newer than this binary understands instead of
+// misreading it. Older schemas stay readable.
+func CheckReadableSchema(ctx context.Context, db *sql.DB) error {
+	var version int
+	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("reading schema version: %w", err)
+	}
+	if version > SchemaVersion {
+		return fmt.Errorf("%w (schema %d, supported %d)", ErrNewerSchema, version, SchemaVersion)
+	}
+	return nil
+}
+
+// migrate brings the database to SchemaVersion. An up-to-date database needs
+// only a header read, so ordinary opens no longer rewrite schema objects or
+// prune revisions. Concurrent openers serialize on the IMMEDIATE transaction
+// and re-read the version inside it, so each step runs exactly once.
 func migrate(db *sql.DB) error {
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("reading schema version: %w", err)
+	}
+	if version == SchemaVersion {
+		return nil
+	}
+	if version > SchemaVersion {
+		return fmt.Errorf("%w (schema %d, supported %d)", ErrNewerSchema, version, SchemaVersion)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("migrating: %w", err)
+	}
+	defer tx.Rollback()
+	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("reading schema version: %w", err)
+	}
+	if version > SchemaVersion {
+		return fmt.Errorf("%w (schema %d, supported %d)", ErrNewerSchema, version, SchemaVersion)
+	}
+	for _, step := range migrations {
+		if step.version <= version {
+			continue
+		}
+		if err := step.apply(tx); err != nil {
+			return fmt.Errorf("migrating to schema %d (%s): %w", step.version, step.name, err)
+		}
+		// PRAGMA arguments cannot be bound; the version is a trusted integer.
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", step.version)); err != nil {
+			return fmt.Errorf("recording schema %d: %w", step.version, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// migrateBaseline creates the schema as it stood before versioning. Every
+// statement is idempotent, so it also completes pre-versioning databases that
+// were created by older releases and lack later tables, and it prunes
+// revisions beyond the retained window once.
+func migrateBaseline(tx *sql.Tx) error {
 	schema := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, scope TEXT NOT NULL, content TEXT NOT NULL,
   source TEXT, session_id TEXT, turn_id TEXT, created_at INTEGER NOT NULL);
@@ -166,8 +253,108 @@ DELETE FROM memory_revisions WHERE rowid IN (
   ) WHERE retention_rank > %d
 );
 `, maxMemoryRevisions, maxMemoryRevisions)
-	if _, err := db.Exec(schema); err != nil {
-		return fmt.Errorf("migrating: %w", err)
+	_, err := tx.Exec(schema)
+	return err
+}
+
+// migrateStemmedKeywordIndex rebuilds the external-content keyword index with
+// the Porter stemmer over unicode61, so "test" matches "tests" and "decide"
+// matches "decided". The index holds no data of its own: it is rebuilt from
+// memories, and the existing triggers keep maintaining it by name.
+func migrateStemmedKeywordIndex(tx *sql.Tx) error {
+	_, err := tx.Exec(`DROP TABLE IF EXISTS memory_fts;
+CREATE VIRTUAL TABLE memory_fts USING fts5(content, content='memories', content_rowid='rowid', tokenize='porter unicode61');
+INSERT INTO memory_fts(memory_fts) VALUES('rebuild');`)
+	return err
+}
+
+// migrateContentHash stores each memory's learned-embedding fingerprint
+// (redact.Fingerprint of its content) so learned search can compare cached
+// vectors in SQL instead of hashing every memory per query. Writers in this
+// package set it; a content change that does not also set it (an older
+// release or an external tool) clears it, and readers treat NULL as unknown
+// and verify the content themselves.
+func migrateContentHash(tx *sql.Tx) error {
+	// Tolerate a column that already exists (a database whose version was
+	// reset), so the step stays idempotent like the baseline.
+	var exists int
+	if err := tx.QueryRow("SELECT count(*) FROM pragma_table_info('memories') WHERE name='content_hash'").Scan(&exists); err != nil {
+		return err
 	}
-	return nil
+	if exists == 0 {
+		if _, err := tx.Exec("ALTER TABLE memories ADD COLUMN content_hash TEXT"); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DROP TRIGGER IF EXISTS memories_au;
+CREATE TRIGGER memories_au AFTER UPDATE OF content ON memories BEGIN
+ INSERT INTO memory_fts(memory_fts,rowid,content) VALUES('delete',old.rowid,old.content);
+ INSERT INTO memory_fts(rowid,content) VALUES(new.rowid,new.content);
+END;
+DROP TRIGGER IF EXISTS memories_content_hash_reset;
+CREATE TRIGGER memories_content_hash_reset AFTER UPDATE OF content ON memories
+ WHEN new.content IS NOT old.content AND new.content_hash IS old.content_hash BEGIN
+ UPDATE memories SET content_hash=NULL WHERE rowid=new.rowid;
+END;`); err != nil {
+		return err
+	}
+	return backfillContentHashes(tx)
+}
+
+// backfillContentHashes fingerprints memories whose content_hash is NULL, in
+// rowid batches so no statement is open while rows are updated. Schema 5
+// runs it again: before writers restored the fingerprint after the reset
+// trigger fired, a re-import or update that changed only marker digests left
+// it NULL (still correct, since readers verify such rows from content, but
+// slower).
+func backfillContentHashes(tx *sql.Tx) error {
+	type pending struct {
+		rowid   int64
+		content sql.NullString
+	}
+	last := int64(math.MinInt64)
+	for {
+		rows, err := tx.Query("SELECT rowid, content FROM memories WHERE rowid>? AND content_hash IS NULL ORDER BY rowid LIMIT 500", last)
+		if err != nil {
+			return err
+		}
+		batch := []pending{}
+		for rows.Next() {
+			var p pending
+			if err := rows.Scan(&p.rowid, &p.content); err != nil {
+				rows.Close()
+				return err
+			}
+			batch = append(batch, p)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		for _, p := range batch {
+			last = p.rowid
+			if !p.content.Valid {
+				continue
+			}
+			if _, err := tx.Exec("UPDATE memories SET content_hash=? WHERE rowid=?", redact.Fingerprint(p.content.String), p.rowid); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// migrateRefingerprint recomputes every stored fingerprint after a change of
+// redact.AlgorithmVersion (redact-v3: keyed markers, digest-free
+// fingerprints). Cached learned vectors fingerprinted under the previous
+// version become stale and are re-embedded by the next explicit embed run.
+func migrateRefingerprint(tx *sql.Tx) error {
+	if _, err := tx.Exec("UPDATE memories SET content_hash=NULL WHERE content_hash IS NOT NULL"); err != nil {
+		return err
+	}
+	return backfillContentHashes(tx)
 }

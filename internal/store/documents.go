@@ -147,7 +147,7 @@ func SyncDocuments(ctx context.Context, db *sql.DB, root, scope string, document
 		for ordinal, chunk := range prepared[i] {
 			id := fmt.Sprintf("doc-%x", sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d", root, document.Path, ordinal))))
 			content := "Document: " + document.Path + "\n" + chunk
-			if _, err := tx.ExecContext(ctx, "INSERT INTO memories(id,scope,content,source,created_at) VALUES(?,?,?,'document',?)", id, scope, content, at); err != nil {
+			if _, err := tx.ExecContext(ctx, "INSERT INTO memories(id,scope,content,source,created_at,content_hash) VALUES(?,?,?,'document',?,?)", id, scope, content, at, redact.Fingerprint(content)); err != nil {
 				return result, err
 			}
 			if _, err := tx.ExecContext(ctx, "INSERT INTO embeddings(memory_id,dim,vector) VALUES(?,?,?)", id, embed.Dim, embed.Encode(embed.Embed(content))); err != nil {
