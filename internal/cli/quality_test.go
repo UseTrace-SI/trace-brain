@@ -131,7 +131,7 @@ func TestRegressionConcurrentExtractRechecksFingerprintInWriteTx(t *testing.T) {
 	agent := "cat >/dev/null; touch '" + started + "'; while [ ! -f '" + release + "' ]; do sleep 0.01; done; printf 'AGENT OUTPUT UNIQUE'"
 	done := make(chan error, 1)
 	go func() { done <- importTrace(context.Background(), io.Discard, source, agent, true) }()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(3 * time.Second * raceSlowdown)
 	for {
 		if _, err := os.Stat(started); err == nil {
 			break
@@ -159,7 +159,7 @@ func TestRegressionConcurrentExtractRechecksFingerprintInWriteTx(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(3 * time.Second * raceSlowdown):
 		t.Fatal("extraction did not finish")
 	}
 	db, err = store.Open(dbPath)

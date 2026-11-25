@@ -84,11 +84,11 @@ Database writers reserve their SQLite write transaction before reading import fi
 
 `watch` holds a per-database lock and supports `--daemon`. `stop` sends a private, instance-specific request and waits for an acknowledgement; it never signals a PID. Legacy PID-only watcher records are rejected. Stop an old watcher through its original terminal before upgrading. Extraction commands have a 30-second timeout.
 
-Run `go test -race -p 1 -count=1 ./...` for the full gate and `go test -race -count=100 -run 'TestRegression|TestCompanion' -timeout=10m ./...` to repeat the regression cases, matching `.github/workflows/ci.yml`. macOS and Linux are supported.
+Run `go test -count=1 ./...` (which also enforces the absolute performance budgets), `go test -race -count=1 ./...` (liveness waits are scaled and absolute budgets skipped under the race detector) and `go test -race -count=100 -run 'TestRegression|TestCompanion' -timeout=30m ./...` to repeat the regression cases, matching `.github/workflows/ci.yml`. macOS and Linux are supported.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs pure Go builds, vet, race tests, and 100 repetitions of the regression cases on GitHub-hosted macOS and Linux runners for pushes, pull requests, and manual runs. The workflow has read-only repository access. Hosted execution begins after these changes are pushed.
+`.github/workflows/ci.yml` runs pure Go builds, vet, staticcheck, tests with and without the race detector, and 100 repetitions of the regression cases on GitHub-hosted macOS and Linux runners for pushes, pull requests, and manual runs. The workflow has read-only repository access. Hosted execution begins after these changes are pushed.
 
 ## Production bounds
 

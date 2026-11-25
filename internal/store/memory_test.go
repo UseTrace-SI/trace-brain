@@ -170,7 +170,9 @@ func TestBoundImportedContentRedactsOnlyBoundedWindowsOfHugeTurns(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > 10*time.Second*raceSlowdown {
+	// The race detector slows this pure-Go work unpredictably, so the
+	// absolute budget is enforced only by the ordinary (non-race) build.
+	if elapsed := time.Since(start); !raceEnabled && elapsed > 10*time.Second {
 		t.Fatalf("bounding a 20 MiB turn took %s", elapsed)
 	}
 	if len(got) > maxMemoryContentBytes || !strings.HasPrefix(got, "PROMPT-HEAD") || !strings.HasSuffix(got, "FINAL-OUTCOME") || strings.Contains(got, "7dF2aQ9mR4xT8vL1pN6cY3zB5kH0sW2u") {

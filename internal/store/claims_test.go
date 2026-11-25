@@ -315,7 +315,12 @@ func TestClaimReadsStayWithinDeadlineAtTheExtractionBudget(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	deadline, cancel := context.WithTimeout(ctx, 2*time.Second*raceSlowdown)
+	// The two-second read budget is enforced only by the ordinary build; the
+	// race build still checks that every query completes.
+	deadline, cancel := context.WithCancel(ctx)
+	if !raceEnabled {
+		deadline, cancel = context.WithTimeout(ctx, 2*time.Second)
+	}
 	defer cancel()
 	for _, subject := range []string{"project", "storage", ""} {
 		if _, err := QueryFacts(deadline, db, FactQuery{Scope: "project", Subject: subject, At: 200000, KnownAt: 200000, Limit: 100, IncludeStale: true}); err != nil {

@@ -75,7 +75,7 @@ CREATE TABLE turns(id TEXT,session_id TEXT,seq INTEGER,prompt TEXT,reasoning TEX
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- importTrace(ctx, io.Discard, source, "echo started > '"+marker+"'; sleep 30", true) }()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(2 * time.Second * raceSlowdown)
 	for {
 		if _, err := os.Stat(marker); err == nil {
 			break
@@ -86,7 +86,7 @@ CREATE TABLE turns(id TEXT,session_id TEXT,seq INTEGER,prompt TEXT,reasoning TEX
 		time.Sleep(5 * time.Millisecond)
 	}
 	// External extraction must not hold the writer lock while waiting on a model.
-	writeCtx, writeCancel := context.WithTimeout(context.Background(), time.Second)
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), time.Second*raceSlowdown)
 	if _, err := db.ExecContext(writeCtx, "INSERT INTO memories(id,scope,content,created_at) VALUES('during-extract','manual','available',1)"); err != nil {
 		writeCancel()
 		t.Fatalf("extractor blocked an independent writer: %v", err)
@@ -98,7 +98,7 @@ CREATE TABLE turns(id TEXT,session_id TEXT,seq INTEGER,prompt TEXT,reasoning TEX
 		if err == nil {
 			t.Fatal("cancelled extraction reported success")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(2 * time.Second * raceSlowdown): // well below the child's 30 s sleep
 		t.Fatal("agent child prevented cancellation")
 	}
 	if _, err := src.Exec("DROP TABLE turns"); err != nil {
@@ -158,7 +158,7 @@ func TestRegressionWatcherIdentityAndShutdown(t *testing.T) {
 	case <-started:
 	case err := <-done:
 		t.Fatalf("watcher failed: %v", err)
-	case <-time.After(3 * time.Second):
+	case <-time.After(3 * time.Second * raceSlowdown):
 		t.Fatal("watcher did not start")
 	}
 	if err := os.WriteFile(path+".watch.stop", []byte(strings.Repeat("0", 64)), 0600); err != nil {
@@ -180,7 +180,7 @@ func TestRegressionWatcherIdentityAndShutdown(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(3 * time.Second * raceSlowdown):
 		t.Fatal("watcher did not stop")
 	}
 	if _, err := os.Stat(path + ".watch.pid"); !os.IsNotExist(err) {

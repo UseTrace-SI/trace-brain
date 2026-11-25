@@ -51,7 +51,7 @@ func TestFactHistoryToolReturnsSupersededClaimsWithinBounds(t *testing.T) {
 	if !found {
 		t.Fatal("brain_fact_history is not a read-only tool")
 	}
-	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second*raceSlowdown)
 	defer cancel()
 	res, err := clientSession.CallTool(callCtx, &mcp.CallToolParams{Name: "brain_fact_history", Arguments: map[string]any{"subject": "tests"}})
 	if err != nil || res.IsError {
