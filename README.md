@@ -97,8 +97,10 @@ Ordinary search text is interpreted as literal words, including punctuation. Con
 The MCP server reports the binary's release version. Its preferred keyword tool is
 the read-only `brain_search` (`query`, `scope`, `since` as an RFC3339 time or a
 relative age such as `36h` or `7d`, `limit` 1–50). It searches the query's literal words
-and echoes them after redacting the query as a whole (so no fragment of a secret is
-returned, though a word redaction removes is still searched). It returns
+and echoes only the searched words that remain after redacting the query as a whole:
+fragments of secrets the redactor recognizes are not returned (secrets it does not
+recognize are; see Redaction markers for how rules differ between components), and
+words it removes are still searched. It returns
 ranked memories with `source`, `session_id`, `turn_id`, `created_at`, `score` and
 `content_truncated`; an empty query lists recent memories. `brain_recall` and
 `brain_query` (and `brain_status`/`brain_overview`) remain as backward-compatible
@@ -136,10 +138,12 @@ five times the requested limit with all-word matches, then any-word matches,
 each by SQLite FTS (BM25) relevance. Within each tier it ranks by a
 blend of BM25 normalized against the best candidate (75%), recency with a
 30-day half-life (15%) and a fixed boost for manual/MCP notes (10%), with
-deterministic recency/ID ties. Near-duplicates (the same scope and the same text
-ignoring only letter case, whitespace and redaction-marker digests, compared over the 2,048-character snippet
-and the last 256 characters) are collapsed to the best-ranked copy; punctuation and
-symbols are significant, so "x > y" and "x < y" stay distinct.
+deterministic recency/ID ties. Near-duplicates (the same scope and the same text,
+compared over the 2,048-character snippet and the last 256 characters, ignoring only
+letter case, whitespace and redaction-marker digests) are collapsed to the best-ranked
+copy. Memories that differ only in a redacted secret of the same kind at the same
+position are therefore merged too. Punctuation and symbols are significant, so
+"x > y" and "x < y" stay distinct.
 The optional hashed-word ranker omits zero-overlap results; it remains a lexical
 fallback. Quality regressions cover relevant older evidence outranking recent
 weak matches, changed extraction inputs, output redaction and deleted-source
