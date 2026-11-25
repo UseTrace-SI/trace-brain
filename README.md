@@ -134,9 +134,10 @@ five times the requested limit with all-word matches, then any-word matches,
 each by SQLite FTS (BM25) relevance. Within each tier it ranks by a
 blend of BM25 normalized against the best candidate (75%), recency with a
 30-day half-life (15%) and a fixed boost for manual/MCP notes (10%), with
-deterministic recency/ID ties. Near-duplicates (the same words ignoring case,
-punctuation and whitespace, compared over the 2,048-character snippet and the
-last 256 characters) are collapsed to the best-ranked copy.
+deterministic recency/ID ties. Near-duplicates (the same scope and the same text
+ignoring only letter case and whitespace, compared over the 2,048-character snippet
+and the last 256 characters) are collapsed to the best-ranked copy; punctuation and
+symbols are significant, so "x > y" and "x < y" stay distinct.
 The optional hashed-word ranker omits zero-overlap results; it remains a lexical
 fallback. Quality regressions cover relevant older evidence outranking recent
 weak matches, changed extraction inputs, output redaction and deleted-source

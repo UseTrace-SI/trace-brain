@@ -76,8 +76,8 @@ func TestSearchRelevanceOutweighsRecencyForStrongerMatches(t *testing.T) {
 func TestSearchCollapsesNearDuplicatesAndStillFillsLimit(t *testing.T) {
 	db := searchTestDB(t)
 	for i := 0; i < 10; i++ {
-		// Case, punctuation and whitespace differences are near-duplicates.
-		insertMemory(t, db, fmt.Sprintf("dup-%02d", i), "project", fmt.Sprintf("Deploy  the RELEASE%s", strings.Repeat("!", i)), "trace-import", daysAgo(i))
+		// Case and whitespace differences are near-duplicates.
+		insertMemory(t, db, fmt.Sprintf("dup-%02d", i), "project", fmt.Sprintf("Deploy%sthe %s", strings.Repeat(" ", i+1), strings.ToUpper("release")[:i%7+1]+"release"[i%7+1:]), "trace-import", daysAgo(i))
 	}
 	for i := 0; i < 5; i++ {
 		insertMemory(t, db, fmt.Sprintf("unique-%d", i), "project", fmt.Sprintf("deploy release candidate %d", i), "trace-import", daysAgo(20+i))
@@ -207,5 +207,31 @@ func TestWritersMaintainContentFingerprint(t *testing.T) {
 	}
 	if _, err := db.Exec("INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSearchDedupKeepsMeaningfulPunctuationAndScopes(t *testing.T) {
+	db := searchTestDB(t)
+	for i, pair := range [][2]string{{"limit x > y", "limit x < y"}, {"limit is -1", "limit is 1"}, {"limit C++", "limit C"}} {
+		insertMemory(t, db, fmt.Sprintf("a%d", i), "project", pair[0], "manual", daysAgo(1))
+		insertMemory(t, db, fmt.Sprintf("b%d", i), "project", pair[1], "manual", daysAgo(1))
+	}
+	insertMemory(t, db, "same-text-other-scope", "other", "limit C", "manual", daysAgo(1))
+	insertMemory(t, db, "case-dup", "project", "LIMIT   c", "manual", daysAgo(2))
+	results, err := Search(context.Background(), db, SearchOpts{Query: "limit", Now: searchNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, r := range results {
+		got[r.ID] = true
+	}
+	for _, id := range []string{"a0", "b0", "a1", "b1", "a2", "b2", "same-text-other-scope"} {
+		if !got[id] {
+			t.Fatalf("%s merged with a different memory: %v", id, resultIDs(results))
+		}
+	}
+	if got["case-dup"] || len(results) != 7 {
+		t.Fatalf("case/whitespace duplicate not collapsed: %v", resultIDs(results))
 	}
 }

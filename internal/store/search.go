@@ -246,7 +246,7 @@ func Search(ctx context.Context, db *sql.DB, opts SearchOpts) ([]SearchResult, e
 	seen := map[[32]byte]bool{}
 	r := redact.Redactor{}
 	for _, c := range found {
-		key := dedupKey(c.Content, c.tail, c.ContentTruncated)
+		key := dedupKey(c.Scope, c.Content, c.tail, c.ContentTruncated)
 		if seen[key] {
 			continue
 		}
@@ -310,11 +310,12 @@ func searchCandidates(ctx context.Context, db *sql.DB, match, filter string, par
 	return found, rows.Err()
 }
 
-// dedupKey identifies near-duplicate memories: the same words, ignoring case,
-// punctuation and whitespace, in the snippet and (for longer memories) the
-// trailing text.
-func dedupKey(snippet, tail string, truncated bool) [32]byte {
-	text := normalizeForDedup(snippet)
+// dedupKey identifies near-duplicate memories: the same scope and the same
+// text ignoring letter case and runs of whitespace, in the snippet and (for
+// longer memories) the trailing text. Punctuation and symbols are kept, so
+// "x > y" and "x < y", "-1" and "1" or "C++" and "C" stay distinct.
+func dedupKey(scope, snippet, tail string, truncated bool) [32]byte {
+	text := scope + "\x00" + normalizeForDedup(snippet)
 	if truncated {
 		text += "\x00" + normalizeForDedup(tail)
 	}
@@ -322,5 +323,5 @@ func dedupKey(snippet, tail string, truncated bool) [32]byte {
 }
 
 func normalizeForDedup(text string) string {
-	return strings.Join(strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) }), " ")
+	return strings.Join(strings.Fields(strings.ToLower(text)), " ")
 }

@@ -26,7 +26,7 @@ func TestKeywordSurfacesShareOneRanking(t *testing.T) {
 	for i, content := range []string{
 		"deploy pipeline timeout during release",
 		"release notes for the deploy",
-		"Release notes for the DEPLOY!", // near-duplicate of the previous note
+		"Release  notes for the DEPLOY", // near-duplicate of the previous note
 		"deploy",
 		"unrelated stylesheet colors",
 	} {
