@@ -65,7 +65,7 @@ func Open(path string) (*sql.DB, error) {
 
 // SchemaVersion is the PRAGMA user_version written by this binary. Databases
 // created before schema versioning report 0 and are upgraded in place.
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // migration upgrades a database from version-1 to version inside the single
 // IMMEDIATE transaction opened by migrate. Steps must be safe to apply to any
@@ -81,6 +81,7 @@ var migrations = []migration{
 	{1, "baseline schema", migrateBaseline},
 	{2, "porter-stemmed keyword index", migrateStemmedKeywordIndex},
 	{3, "stored content fingerprints", migrateContentHash},
+	{4, "keyed-marker content fingerprints", migrateRefingerprint},
 }
 
 // migrate brings the database to SchemaVersion. An up-to-date database needs
@@ -322,4 +323,15 @@ func backfillContentHashes(tx *sql.Tx) error {
 			}
 		}
 	}
+}
+
+// migrateRefingerprint recomputes every stored fingerprint after a change of
+// redact.AlgorithmVersion (redact-v3: keyed markers, digest-free
+// fingerprints). Cached learned vectors fingerprinted under the previous
+// version become stale and are re-embedded by the next explicit embed run.
+func migrateRefingerprint(tx *sql.Tx) error {
+	if _, err := tx.Exec("UPDATE memories SET content_hash=NULL WHERE content_hash IS NOT NULL"); err != nil {
+		return err
+	}
+	return backfillContentHashes(tx)
 }

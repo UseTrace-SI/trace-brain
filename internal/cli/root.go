@@ -312,6 +312,13 @@ func doctorCmd() *cobra.Command {
 		}
 		defer db.Close()
 		fmt.Fprintln(cmd.OutOrStdout(), "trace-brain doctor: ok")
+		if redact.PersistentMarkerKey() {
+			path, _ := redact.CheckMarkerKey()
+			fmt.Fprintf(cmd.OutOrStdout(), "redaction markers: shared key %s\n", path)
+		} else {
+			_, err := redact.CheckMarkerKey()
+			fmt.Fprintf(cmd.OutOrStdout(), "redaction markers: per-process key (shared key unavailable: %v)\n", err)
+		}
 		return nil
 	}}
 }

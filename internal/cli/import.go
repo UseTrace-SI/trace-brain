@@ -74,7 +74,13 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 		if err != nil {
 			return false, err
 		}
-		fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(content+"\x00"+agentCmd)))
+		// Fingerprints compare the redacted text with marker digests elided,
+		// so a process using an ephemeral marker key (the shared key file is
+		// unavailable) does not see every secret-bearing entity as changed.
+		// The exact form written by earlier releases is still accepted for
+		// entities without secrets; secret-bearing ones re-import once and
+		// pick up keyed markers.
+		fingerprint, legacyFingerprint := importFingerprints(content, agentCmd)
 		var old string
 		if extract {
 			err = db.QueryRowContext(ctx, "SELECT fingerprint FROM memory_imports WHERE source_db=? AND source=? AND entity_kind=? AND entity_id=?", path, source, kind, entityID).Scan(&old)
@@ -84,7 +90,7 @@ func importTrace(ctx context.Context, out io.Writer, path, agentCmd string, extr
 		if err != nil && err != sql.ErrNoRows {
 			return false, err
 		}
-		if old == fingerprint {
+		if old == fingerprint || old == legacyFingerprint {
 			return false, nil
 		}
 		if extract && agentCmd != "" {
@@ -268,6 +274,14 @@ ON CONFLICT(memory_id) DO UPDATE SET source_at=excluded.source_at WHERE source_a
 }
 
 // importMemoryID is the stable ID of the memory derived from a source entity.
+// importFingerprints returns the current fingerprint of redacted import
+// content (marker digests elided) and the exact form earlier releases stored.
+func importFingerprints(content, agentCmd string) (current, legacy string) {
+	current = fmt.Sprintf("%x", sha256.Sum256([]byte("import-v2\x00"+redact.Canonical(content)+"\x00"+agentCmd)))
+	legacy = fmt.Sprintf("%x", sha256.Sum256([]byte(content+"\x00"+agentCmd)))
+	return current, legacy
+}
+
 func importMemoryID(path, source, kind, entityID string) string {
 	return fmt.Sprintf("import-%x", sha256.Sum256([]byte(path+"\x00"+source+"\x00"+kind+"\x00"+entityID)))
 }

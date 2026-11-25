@@ -134,10 +134,11 @@ func TestMigrationUpgradesPreVersioningDatabaseWithoutDataLoss(t *testing.T) {
 	if err := hashes.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// The fixture's cached vector still matches its memory after the upgrade.
+	// The fixture's cached vector was fingerprinted under redact-v2; schema 4
+	// (keyed markers) makes it stale so the next embed run refreshes it.
 	var matching int
-	if err := db.QueryRow("SELECT count(*) FROM semantic_embeddings e JOIN memories m ON m.id=e.memory_id WHERE e.content_hash=m.content_hash").Scan(&matching); err != nil || matching != 1 {
-		t.Fatalf("cached vector no longer matches: %d %v", matching, err)
+	if err := db.QueryRow("SELECT count(*) FROM semantic_embeddings e JOIN memories m ON m.id=e.memory_id WHERE e.content_hash=m.content_hash").Scan(&matching); err != nil || matching != 0 {
+		t.Fatalf("vector fingerprinted under the previous redaction version still matches: %d %v", matching, err)
 	}
 	var ddl string
 	if err := db.QueryRow("SELECT sql FROM sqlite_master WHERE name='memory_fts'").Scan(&ddl); err != nil || !strings.Contains(ddl, "porter unicode61") {
@@ -219,5 +220,35 @@ WITH RECURSIVE seq(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM seq WHERE x<60) IN
 	var n int
 	if err := db.QueryRow("SELECT count(*) FROM memory_revisions").Scan(&n); err != nil || n != 60 {
 		t.Fatalf("up-to-date open rewrote revisions: %d %v", n, err)
+	}
+}
+
+// Schema 4 recomputes fingerprints written under the previous redaction
+// algorithm version.
+func TestMigrationRefingerprintsAfterRedactionVersionChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "deploy token ghp_abcdefghijklmnopqrstuvwxyz"
+	if err := Remember(context.Background(), db, "m", "project", content, "manual", 1); err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := db.QueryRow("SELECT content FROM memories WHERE id='m'").Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE memories SET content_hash=? WHERE id='m'; PRAGMA user_version=3", redact.FingerprintVersion(stored, "redact-v2")); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if db, err = Open(path); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var hash string
+	if err := db.QueryRow("SELECT content_hash FROM memories WHERE id='m'").Scan(&hash); err != nil || hash != redact.Fingerprint(stored) {
+		t.Fatalf("fingerprint not recomputed: %q %v", hash, err)
 	}
 }

@@ -142,6 +142,35 @@ fallback. Quality regressions cover relevant older evidence outranking recent
 weak matches, changed extraction inputs, output redaction and deleted-source
 cleanup. Source/session/turn provenance remains present in context responses.
 
+## Redaction markers
+
+A redacted value is replaced by `⟨redacted:KIND:XXXXXXXX⟩`, where the digits are
+an HMAC-SHA256 of the value under a per-install key. trace-brain shares the Trace
+CLI's key file, `$TRACE_HOME/redaction.key` (an absolute `TRACE_HOME`) or
+`~/.trace/redaction.key`, and its creation rules: a missing or damaged key is
+created as a 0600 file in a 0700 directory and published with a hard link, so
+concurrent first runs of any Trace component agree on one key; a symlink or other
+non-regular file is never used; a group/world-readable key is tightened to 0600.
+Equal secrets therefore carry equal markers in every Trace component, and a marker
+no longer confirms a guessed secret. `trace-brain doctor` reports which key is in use.
+
+If the shared key cannot be read or created, markers use an ephemeral per-process
+key (still unguessable, but not equal across processes). Nothing that is compared
+over time depends on marker digests: learned-vector fingerprints (`content_hash`)
+and Trace import change detection compare redacted text with marker digests
+elided, so a missing key never makes fingerprints stale or re-imports history.
+Document refresh compares exact chunks, so with an ephemeral key, document chunks
+containing secrets are rewritten on each `documents sync`.
+
+Schema 4 (redaction algorithm `redact-v3`) recomputes every stored fingerprint, so
+learned vectors cached by earlier releases are reported stale until the next
+`embed` run. Memories already stored keep the unkeyed markers written by earlier
+releases: manual/MCP notes, revisions, captured fact evidence and document chunks
+are not rewritten. Derived Trace memories that contain a secret are re-imported
+once by the next refresh and then carry keyed markers; claims citing them as
+current evidence are re-extracted or reported stale like any other source change.
+Use `update` or `forget` to replace old markers in a manual note.
+
 ## Memory lifecycle and workspace retrieval
 
 Manual and MCP memories can be revised with `update`; the content, keyword index,
