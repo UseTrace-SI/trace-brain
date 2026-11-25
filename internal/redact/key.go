@@ -93,21 +93,51 @@ func randomMarkerKey() []byte {
 // loadMarkerKey reads the key at path, creating it with mode 0600 when it is
 // missing or damaged. Concurrent first runs agree on one key: a new key is
 // published with a hard link, which never replaces a key another process
-// published first.
+// published first. Replacing a damaged key is serialized by an advisory lock
+// on path+".lock": inside it the key is read again, and only a key that is
+// still damaged is moved aside before a new one is linked in its place.
 func loadMarkerKey(path string) ([]byte, error) {
 	key, err := readMarkerKey(path)
 	if err == nil {
 		return key, nil
 	}
-	damaged := !errors.Is(err, os.ErrNotExist)
-	if damaged && !errors.Is(err, errDamagedMarkerKey) {
+	if errors.Is(err, os.ErrNotExist) {
+		return publishMarkerKey(path)
+	}
+	if !errors.Is(err, errDamagedMarkerKey) {
 		return nil, err
 	}
+	unlock, err := lockMarkerKey(path + ".lock")
+	if err != nil {
+		return nil, fmt.Errorf("locking marker key: %w", err)
+	}
+	defer unlock()
+	// Another process may have repaired the key while this one waited.
+	key, err = readMarkerKey(path)
+	if err == nil {
+		return key, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errDamagedMarkerKey) {
+		return nil, err
+	}
+	if errors.Is(err, errDamagedMarkerKey) {
+		// Keep the damaged file for inspection; never delete or overwrite a
+		// key in place, so a key published meanwhile is never lost.
+		if err := os.Rename(path, path+".damaged"); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("moving damaged marker key aside: %w", err)
+		}
+	}
+	return publishMarkerKey(path)
+}
+
+// publishMarkerKey writes a new random key to a private temporary file and
+// hard-links it to path. If a key appeared there first, that key is used.
+func publishMarkerKey(path string) ([]byte, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("creating state directory: %w", err)
 	}
-	key = randomMarkerKey()
+	key := randomMarkerKey()
 	tmp, err := os.CreateTemp(dir, markerKeyFile+".*.tmp")
 	if err != nil {
 		return nil, fmt.Errorf("creating marker key: %w", err)
@@ -128,13 +158,6 @@ func loadMarkerKey(path string) ([]byte, error) {
 	}
 	if err := tmp.Close(); err != nil {
 		return nil, fmt.Errorf("closing marker key: %w", err)
-	}
-	if damaged {
-		// A damaged key protects nothing; replace it atomically.
-		if err := os.Rename(name, path); err != nil {
-			return nil, fmt.Errorf("replacing damaged marker key: %w", err)
-		}
-		return key, nil
 	}
 	if err := os.Link(name, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
