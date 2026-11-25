@@ -5,3 +5,4 @@ bin/
 *.db-*
 .env
 .env.*
+!internal/store/testdata/*.db
