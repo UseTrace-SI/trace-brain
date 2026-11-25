@@ -235,3 +235,19 @@ func TestSearchDedupKeepsMeaningfulPunctuationAndScopes(t *testing.T) {
 		t.Fatalf("case/whitespace duplicate not collapsed: %v", resultIDs(results))
 	}
 }
+
+// Update after a change of marker digests only keeps the fingerprint set.
+func TestUpdateWithMarkerOnlyChangeKeepsFingerprint(t *testing.T) {
+	db := searchTestDB(t)
+	ctx := context.Background()
+	if err := Remember(ctx, db, "m", "project", "note ⟨redacted:env:11111111⟩", "manual", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := Update(ctx, db, "m", "", "note ⟨redacted:env:22222222⟩", 2); err != nil {
+		t.Fatal(err)
+	}
+	var hash sql.NullString
+	if err := db.QueryRow("SELECT content_hash FROM memories WHERE id='m'").Scan(&hash); err != nil || hash.String != redact.Fingerprint("note ⟨redacted:env:22222222⟩") {
+		t.Fatalf("fingerprint after marker-only update: %v %v", hash, err)
+	}
+}

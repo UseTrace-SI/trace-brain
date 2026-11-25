@@ -66,7 +66,7 @@ func Open(path string) (*sql.DB, error) {
 
 // SchemaVersion is the PRAGMA user_version written by this binary. Databases
 // created before schema versioning report 0 and are upgraded in place.
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 // migration upgrades a database from version-1 to version inside the single
 // IMMEDIATE transaction opened by migrate. Steps must be safe to apply to any
@@ -83,6 +83,7 @@ var migrations = []migration{
 	{2, "porter-stemmed keyword index", migrateStemmedKeywordIndex},
 	{3, "stored content fingerprints", migrateContentHash},
 	{4, "keyed-marker content fingerprints", migrateRefingerprint},
+	{5, "restore cleared content fingerprints", backfillContentHashes},
 }
 
 // ErrNewerSchema reports a database written by a newer release.
@@ -301,7 +302,11 @@ END;`); err != nil {
 }
 
 // backfillContentHashes fingerprints memories whose content_hash is NULL, in
-// rowid batches so no statement is open while rows are updated.
+// rowid batches so no statement is open while rows are updated. Schema 5
+// runs it again: before writers restored the fingerprint after the reset
+// trigger fired, a re-import or update that changed only marker digests left
+// it NULL (still correct, since readers verify such rows from content, but
+// slower).
 func backfillContentHashes(tx *sql.Tx) error {
 	type pending struct {
 		rowid   int64

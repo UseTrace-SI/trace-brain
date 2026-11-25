@@ -77,7 +77,13 @@ func Update(ctx context.Context, db *sql.DB, id, scope, content string, at int64
 	if _, err := tx.ExecContext(ctx, "INSERT INTO memory_revisions(memory_id,revision,scope,content,recorded_at) SELECT ?,coalesce(max(revision),0)+1,?,?,? FROM memory_revisions WHERE memory_id=?", id, scope, content, at, id); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE memories SET scope=?,content=?,content_hash=? WHERE id=?", scope, content, redact.Fingerprint(content), id); err != nil {
+	hash := redact.Fingerprint(content)
+	if _, err := tx.ExecContext(ctx, "UPDATE memories SET scope=?,content=?,content_hash=? WHERE id=?", scope, content, hash, id); err != nil {
+		return err
+	}
+	// The reset trigger clears an unchanged fingerprint when only marker
+	// digests differ; restore it (this update does not fire the trigger).
+	if _, err := tx.ExecContext(ctx, "UPDATE memories SET content_hash=? WHERE id=? AND content_hash IS NULL", hash, id); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM semantic_embeddings WHERE memory_id=?", id); err != nil {

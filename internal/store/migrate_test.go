@@ -270,3 +270,27 @@ func TestCheckReadableSchemaAcceptsOlderAndRefusesNewer(t *testing.T) {
 		t.Fatalf("newer schema accepted: %v", err)
 	}
 }
+
+// Schema 5 restores fingerprints that writers before it could leave NULL.
+func TestMigrationRestoresClearedFingerprints(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Remember(context.Background(), db, "m", "project", "note ⟨redacted:env:11111111⟩", "manual", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE memories SET content_hash=NULL; PRAGMA user_version=4"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if db, err = Open(path); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var missing int
+	if err := db.QueryRow("SELECT count(*) FROM memories WHERE content_hash IS NULL").Scan(&missing); err != nil || missing != 0 {
+		t.Fatalf("cleared fingerprints not restored: %d %v", missing, err)
+	}
+}

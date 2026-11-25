@@ -226,7 +226,9 @@ returning a partial ranking. Each memory stores the fingerprint of its redacted
 content (schema 3, backfilled once on upgrade: about 0.5–2 s per 20,000 memories),
 so cached vectors are matched in SQL; only rows without a stored fingerprint and
 the rows about to be returned are read, re-verified and redacted. A content change
-by an external writer clears the stored fingerprint. A top-ranked memory whose
+by an external writer clears the stored fingerprint; trace-brain's own writers set it
+again even when only marker digests changed, and schema 5 restores fingerprints that
+earlier builds of this branch left cleared. A top-ranked memory whose
 provenance exceeds the output bounds or contains protected text is skipped and
 counted in `skipped_malformed` with a `warnings` entry instead of failing the query. The learned read reports
 `needs_embeddings` for a missing vector table without migrating it. Ordinary MCP
