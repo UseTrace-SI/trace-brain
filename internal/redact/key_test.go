@@ -51,8 +51,9 @@ func TestMarkerKeyIsCreatedPrivatelyAndReused(t *testing.T) {
 	if err != nil || !bytes.Equal(first, second) || len(first) != 32 {
 		t.Fatalf("key not reused across runs: %x %x %v", first, second, err)
 	}
+	// Only the key and its lock file remain.
 	entries, _ := os.ReadDir(filepath.Dir(path))
-	if len(entries) != 1 {
+	if len(entries) != 2 || entries[0].Name() != markerKeyFile || entries[1].Name() != markerKeyFile+".lock" {
 		t.Fatalf("temporary key files left behind: %v", entries)
 	}
 }

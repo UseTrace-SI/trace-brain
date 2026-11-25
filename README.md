@@ -152,10 +152,12 @@ an HMAC-SHA256 of the value under a per-install key. trace-brain shares the Trac
 CLI's key file, `$TRACE_HOME/redaction.key` (an absolute `TRACE_HOME`) or
 `~/.trace/redaction.key`, and its creation rules: a missing or damaged key is
 created as a 0600 file in a 0700 directory and published with a hard link, so
-concurrent first runs of any Trace component agree on one key; a damaged key is
-replaced under an advisory lock (`redaction.key.lock`), moved aside to
-`redaction.key.damaged` and never overwritten in place; a symlink or other
-non-regular file is never used; a group/world-readable key is tightened to 0600.
+concurrent first runs of any Trace component agree on one key. Creation and repair
+run under an advisory lock (`redaction.key.lock`, waited on for at most five seconds,
+after which the same steps run unlocked); a damaged key is moved aside to its own
+`redaction.key.damaged-<unixnano>` file and never overwritten in place, so earlier
+damaged copies are kept; a symlink or other non-regular file is never used as the key
+or followed as the lock; a group/world-readable key is tightened to 0600.
 A marker no longer confirms a guessed secret, and when trace-brain and the Trace CLI
 detect the same span of text with the same rule kind they produce the same marker.
 Their detection rules are not yet shared, however: the rule sets, minimum lengths and

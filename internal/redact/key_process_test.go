@@ -92,31 +92,64 @@ func TestConcurrentProcessesAgreeOnOneKey(t *testing.T) {
 func TestDamagedKeyIsMovedAsideUnderAPrivateLock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, markerKeyFile)
-	if err := os.WriteFile(path, []byte("not a key"), 0600); err != nil {
-		t.Fatal(err)
+	// Two damages in a row each keep their own copy aside.
+	for _, damaged := range []string{"first damage", "second damage"} {
+		if err := os.WriteFile(path, []byte(damaged), 0600); err != nil {
+			t.Fatal(err)
+		}
+		key, err := loadMarkerKey(path)
+		if err != nil || len(key) != 32 {
+			t.Fatalf("repair: %x %v", key, err)
+		}
 	}
-	key, err := loadMarkerKey(path)
-	if err != nil || len(key) != 32 {
-		t.Fatalf("repair: %x %v", key, err)
+	asides, err := filepath.Glob(path + ".damaged-*")
+	if err != nil || len(asides) != 2 {
+		t.Fatalf("damaged keys not kept aside separately: %v %v", asides, err)
 	}
-	if aside, err := os.ReadFile(path + ".damaged"); err != nil || string(aside) != "not a key" {
-		t.Fatalf("damaged key not kept aside: %q %v", aside, err)
+	kept := map[string]bool{}
+	for _, aside := range asides {
+		data, err := os.ReadFile(aside)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kept[string(data)] = true
+	}
+	if !kept["first damage"] || !kept["second damage"] {
+		t.Fatalf("a damaged copy was overwritten: %v", kept)
 	}
 	if info, err := os.Lstat(path + ".lock"); err != nil || info.Mode().Perm() != 0600 || !info.Mode().IsRegular() {
 		t.Fatalf("lock file: %v %v", info, err)
 	}
-	// A symlinked lock file is never followed.
+	// A symlinked lock file is never followed; the key is still created,
+	// without the lock.
 	other := filepath.Join(t.TempDir(), markerKeyFile)
-	if err := os.WriteFile(other, []byte("damaged"), 0600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.Symlink(filepath.Join(dir, "elsewhere"), other+".lock"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadMarkerKey(other); err == nil {
-		t.Fatal("followed a symlinked lock file")
+	if key, err := loadMarkerKey(other); err != nil || len(key) != 32 {
+		t.Fatalf("broken lock path blocked key creation: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "elsewhere")); !os.IsNotExist(err) {
 		t.Fatal("created the symlink target")
+	}
+}
+
+// A lock held for too long never blocks key creation indefinitely.
+func TestMarkerKeyLockWaitIsBounded(t *testing.T) {
+	original := markerKeyLockWait
+	markerKeyLockWait = 50 * time.Millisecond
+	defer func() { markerKeyLockWait = original }()
+	path := filepath.Join(t.TempDir(), markerKeyFile)
+	unlock, err := lockMarkerKey(path + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	start := time.Now()
+	if key, err := loadMarkerKey(path); err != nil || len(key) != 32 {
+		t.Fatalf("held lock blocked creation: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("waited %s for a held lock", elapsed)
 	}
 }
